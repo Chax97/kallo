@@ -1,15 +1,34 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+const _scheme = 'kallo';
+const _redirectUrl = '$_scheme://auth-callback';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  if (Platform.isWindows) {
+    await _registerWindowsUrlScheme();
+  }
+
   await Supabase.initialize(
-    url: 'YOUR_SUPABASE_URL',       // replace with your project URL
+    url: 'YOUR_SUPABASE_URL',        // replace with your project URL
     anonKey: 'YOUR_SUPABASE_ANON_KEY', // replace with your anon key
   );
 
   runApp(const KalloApp());
+}
+
+/// Registers `kallo://` as a URL scheme in the Windows registry so the
+/// browser can redirect back to the app after OAuth.
+Future<void> _registerWindowsUrlScheme() async {
+  final exe = Platform.resolvedExecutable;
+  const base = 'HKCU\\Software\\Classes\\$_scheme';
+  await Process.run('reg', ['add', base, '/ve', '/d', 'URL:Kallo Protocol', '/f']);
+  await Process.run('reg', ['add', base, '/v', 'URL Protocol', '/d', '', '/f']);
+  await Process.run('reg', ['add', '$base\\shell\\open\\command', '/ve', '/d', '"$exe" "%1"', '/f']);
 }
 
 final supabase = Supabase.instance.client;
@@ -51,7 +70,7 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       await supabase.auth.signInWithOAuth(
         OAuthProvider.google,
-        redirectTo: 'io.supabase.kallo://login-callback', // update for your scheme
+        redirectTo: _redirectUrl,
       );
     } on AuthException catch (e) {
       if (mounted) {
@@ -69,7 +88,7 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       await supabase.auth.signInWithOAuth(
         OAuthProvider.azure,
-        redirectTo: 'io.supabase.kallo://login-callback', // update for your scheme
+        redirectTo: _redirectUrl,
       );
     } on AuthException catch (e) {
       if (mounted) {
