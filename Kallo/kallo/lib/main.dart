@@ -14,8 +14,8 @@ Future<void> main() async {
   }
 
   await Supabase.initialize(
-    url: 'YOUR_SUPABASE_URL',        // replace with your project URL
-    anonKey: 'YOUR_SUPABASE_ANON_KEY', // replace with your anon key
+    url: 'https://iqzewdhqmpqligwochua.supabase.co',
+    anonKey: 'sb_publishable_-3a2oDGKp1K-y7kDOS-Uaw_N8Gm1Lgg', // replace with your anon key
   );
 
   runApp(const KalloApp());
