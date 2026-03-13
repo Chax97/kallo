@@ -1,7 +1,10 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'screens/dialler_dashboard.dart';
 
 const _scheme = 'kallo';
 const _redirectUrl = '$_scheme://auth-callback';
@@ -18,7 +21,11 @@ Future<void> main() async {
     anonKey: 'sb_publishable_-3a2oDGKp1K-y7kDOS-Uaw_N8Gm1Lgg', // replace with your anon key
   );
 
-  runApp(const KalloApp());
+  runApp(
+      ProviderScope(
+        child: KalloApp(),
+      )
+  );
 }
 
 /// Registers `kallo://` as a URL scheme in the Windows registry so the
@@ -44,12 +51,12 @@ class KalloApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF6C63FF),
-          brightness: Brightness.dark,
+          brightness: Brightness.light,
         ),
         useMaterial3: true,
       ),
       home: supabase.auth.currentSession != null
-          ? const HomeScreen()
+          ? const DiallerDashboard()
           : const AuthScreen(),
     );
   }
@@ -107,7 +114,7 @@ class _AuthScreenState extends State<AuthScreen> {
     supabase.auth.onAuthStateChange.listen((data) {
       if (data.event == AuthChangeEvent.signedIn && mounted) {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
+          MaterialPageRoute(builder: (_) => const DiallerDashboard()),
         );
       }
     });
@@ -184,37 +191,3 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final user = supabase.auth.currentUser;
-    return Scaffold(
-      backgroundColor: const Color(0xFF0F0F1A),
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        title: const Text('kallo', style: TextStyle(color: Color(0xFF6C63FF))),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white54),
-            onPressed: () async {
-              await supabase.auth.signOut();
-              if (context.mounted) {
-                Navigator.of(context).pushReplacement(
-                  MaterialPageRoute(builder: (_) => const AuthScreen()),
-                );
-              }
-            },
-          ),
-        ],
-      ),
-      body: Center(
-        child: Text(
-          'Welcome, ${user?.email ?? user?.id ?? 'user'}',
-          style: const TextStyle(color: Colors.white70, fontSize: 18),
-        ),
-      ),
-    );
-  }
-}
