@@ -47,31 +47,19 @@ Deno.serve(async (req) => {
   switch (eventType) {
     case "call.initiated": {
       const { error } = await supabase.from("call_logs").upsert({
-      call_control_id: callData.call_control_id,
-      call_leg_id: callData.call_leg_id,
-      call_session_id: callData.call_session_id,
-      direction: callData.direction,
-      from_number: callData.from,
-      to_number: callData.to,
-      state: "initiated",
-      started_at: new Date().toISOString(),
-  }, { onConflict: "call_control_id" })
-    if (error) console.error("call.initiated DB error:", error.message)
-
-    // Answer the call via Call Control API
-    if (callData.direction === "incoming") {
-      const apiKey = Deno.env.get("TELNYX_API_KEY")!
-      await fetch(`https://api.telnyx.com/v2/calls/${callData.call_control_id}/actions/answer`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({}),
-      })
+        call_control_id: callData.call_control_id,
+        call_leg_id: callData.call_leg_id,
+        call_session_id: callData.call_session_id,
+        direction: callData.direction,
+        from_number: callData.from,
+        to_number: callData.to,
+        state: "initiated",
+        started_at: new Date().toISOString(),
+      }, { onConflict: "call_control_id" })
+      if (error) console.error("call.initiated DB error:", error.message)
+      break
     }
-    break
-}
+
     case "call.answered": {
       const { error } = await supabase
         .from("call_logs")

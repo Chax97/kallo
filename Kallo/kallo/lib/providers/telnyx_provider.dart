@@ -117,12 +117,19 @@ class TelnyxNotifier extends Notifier<TxState> {
 
   Future<void> hangup() async {
     final callControlId = _activeCallControlId;
-    if (callControlId != null) {
-      // Fire and forget — don't wait, just tell Telnyx to hang up
-      Supabase.instance.client.functions
-          .invoke('telnyx-hangup', body: {'call_control_id': callControlId});
-    }
     _endCall();
+    if (callControlId != null) {
+      try {
+        print('Hanging up call: $callControlId');
+        final response = await Supabase.instance.client.functions
+            .invoke('telnyx-hangup', body: {'call_control_id': callControlId});
+        print('Hangup response: ${response.data} status: ${response.status}');
+      } catch (e) {
+        print('Hangup error: $e');
+      }
+    } else {
+      print('Hangup called but no active call_control_id');
+    }
   }
 
   void _endCall() {
