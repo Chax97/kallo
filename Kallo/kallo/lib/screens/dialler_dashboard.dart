@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../providers/sip_provider.dart';
 import '../providers/telnyx_provider.dart';
 import '../widgets/dialler/active_call_overlay.dart';
 import '../widgets/dialler/call_list_panel.dart';
@@ -16,6 +17,7 @@ class DiallerDashboard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // Initialise the Telnyx SIP connection as soon as the dashboard loads.
     ref.watch(telnyxProvider);
+    ref.watch(sipProvider);
 
     return Scaffold(
       body: Stack(

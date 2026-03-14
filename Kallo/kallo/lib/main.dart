@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'providers/sip_provider.dart';
+
 import 'screens/dialler_dashboard.dart';
 
 const _scheme = 'kallo';
