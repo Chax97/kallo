@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'providers/sip_provider.dart';
 
+
 import 'screens/dialler_dashboard.dart';
 
 const _scheme = 'kallo';
@@ -42,11 +43,14 @@ Future<void> _registerWindowsUrlScheme() async {
 
 final supabase = Supabase.instance.client;
 
-class KalloApp extends StatelessWidget {
+class KalloApp extends ConsumerWidget {
   const KalloApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Eagerly initialise Telnyx audio
+    ref.read(telnyxAudioProvider);
+
     return MaterialApp(
       title: 'Kallo',
       debugShowCheckedModeBanner: false,
@@ -63,7 +67,6 @@ class KalloApp extends StatelessWidget {
     );
   }
 }
-
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
 

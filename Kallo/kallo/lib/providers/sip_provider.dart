@@ -1,112 +1,127 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:sip_ua/sip_ua.dart';
 
 import '../config/telnyx_config.dart';
+import '../services/telnyx_socket_service.dart';
+import '../services/telnyx_webrtc_service.dart';
 
-class SipNotifier extends Notifier<void> implements SipUaHelperListener {
-  late SIPUAHelper _helper;
-  RTCVideoRenderer? _localRenderer;
-  RTCVideoRenderer? _remoteRenderer;
-  Call? _currentCall;
-  bool _muted = false;
+enum VertoCallState { idle, dialing, ringing, active }
+
+class VertoState {
+  final bool connected;
+  final bool loggedIn;
+  final VertoCallState call;
+  final String? activeNumber;
+  final bool muted;
+
+  const VertoState({
+    this.connected = false,
+    this.loggedIn = false,
+    this.call = VertoCallState.idle,
+    this.activeNumber,
+    this.muted = false,
+  });
+
+  VertoState copyWith({
+    bool? connected,
+    bool? loggedIn,
+    VertoCallState? call,
+    String? activeNumber,
+    bool clearNumber = false,
+    bool? muted,
+  }) {
+    return VertoState(
+      connected: connected ?? this.connected,
+      loggedIn: loggedIn ?? this.loggedIn,
+      call: call ?? this.call,
+      activeNumber: clearNumber ? null : (activeNumber ?? this.activeNumber),
+      muted: muted ?? this.muted,
+    );
+  }
+}
+
+class VertoNotifier extends Notifier<VertoState> {
+  late TelnyxSocketService _socket;
+  late TelnyxWebRTCService _webrtc;
 
   @override
-  void build() {
-    _helper = SIPUAHelper();
-    _helper.addSipUaHelperListener(this);
+  VertoState build() {
+    _socket = TelnyxSocketService();
+    _webrtc = TelnyxWebRTCService(_socket);
+
+    _socket.onLoggedIn = () {
+      state = state.copyWith(connected: true, loggedIn: true);
+    };
+
+    _socket.onDisconnected = () {
+      state = state.copyWith(connected: false, loggedIn: false);
+    };
+
+    _webrtc.onCallAnswered = () {
+      state = state.copyWith(call: VertoCallState.active);
+    };
+
+    _webrtc.onCallEnded = () {
+      state = state.copyWith(
+        call: VertoCallState.idle,
+        clearNumber: true,
+        muted: false,
+      );
+    };
+
     ref.onDispose(() {
-      _helper.removeSipUaHelperListener(this);
-      _helper.stop();
-      _localRenderer?.dispose();
-      _remoteRenderer?.dispose();
+      _webrtc.hangup();
+      _socket.dispose();
     });
-    _connect();
+
+    _socket.connect();
+    return const VertoState();
   }
 
-  void _connect() {
-    final settings = UaSettings();
-    settings.transportType = TransportType.WS;
-    settings.webSocketUrl = 'wss://rtc.telnyx.com:443';
-    settings.webSocketSettings.extraHeaders = {};
-    settings.webSocketSettings.allowBadCertificate = false;
-    settings.uri = 'sip:${kTelnyxSipUser}@sip.telnyx.com';
-    settings.authorizationUser = kTelnyxSipUser;
-    settings.password = kTelnyxSipPassword;
-    settings.displayName = kTelnyxCallerName;
-    settings.userAgent = 'Kallo/1.0';
-    settings.dtmfMode = DtmfMode.RFC2833;
-    _helper.start(settings);
-  }
+  bool get hasRemoteRenderer => _webrtc.hasRemoteRenderer;
+  RTCVideoRenderer get remoteRenderer => _webrtc.remoteRenderer;
 
-  @override
-  void callStateChanged(Call call, CallState callState) {
-    _currentCall = call;
-    switch (callState.state) {
-      case CallStateEnum.STREAM:
-        _attachStream(callState);
-        break;
-      case CallStateEnum.CONFIRMED:
-        // Audio streams arrive via STREAM events
-        break;
-      case CallStateEnum.ENDED:
-      case CallStateEnum.FAILED:
-        _cleanupAudio();
-        _currentCall = null;
-        _muted = false;
-        break;
-      default:
-        break;
+  Future<void> dial(String number) async {
+    if (state.call != VertoCallState.idle || !state.loggedIn) return;
+
+    String formatted = number.replaceAll(RegExp(r'[\s\-]'), '');
+    if (formatted.startsWith('0')) formatted = '+61${formatted.substring(1)}';
+    if (!formatted.startsWith('+')) formatted = '+$formatted';
+
+    state = state.copyWith(call: VertoCallState.dialing, activeNumber: number);
+    try {
+      await _webrtc.newCall(
+        destination: formatted,
+        callerName: kTelnyxCallerName,
+        callerNumber: kTelnyxCallerNumber,
+      );
+      state = state.copyWith(call: VertoCallState.ringing);
+    } catch (e) {
+      debugPrint('WebRTC dial error: $e');
+      state = state.copyWith(call: VertoCallState.idle, clearNumber: true);
     }
   }
 
-  Future<void> _attachStream(CallState callState) async {
-    _localRenderer ??= RTCVideoRenderer();
-    _remoteRenderer ??= RTCVideoRenderer();
-    await _localRenderer!.initialize();
-    await _remoteRenderer!.initialize();
-
-    if (callState.originator == Originator.local) {
-      _localRenderer!.srcObject = callState.stream;
-    } else {
-      _remoteRenderer!.srcObject = callState.stream;
-    }
-  }
-
-  void _cleanupAudio() {
-    _localRenderer?.srcObject = null;
-    _remoteRenderer?.srcObject = null;
+  Future<void> hangup() async {
+    await _webrtc.hangup();
+    state = state.copyWith(
+      call: VertoCallState.idle,
+      clearNumber: true,
+      muted: false,
+    );
   }
 
   void toggleMute() {
-    final call = _currentCall;
-    if (call == null) return;
-    _muted = !_muted;
-    if (_muted) {
-      call.mute(true, false);
-    } else {
-      call.unmute(true, false);
-    }
+    _webrtc.toggleMute();
+    state = state.copyWith(muted: !state.muted);
   }
-
-  @override
-  void onNewMessage(SIPMessageRequest msg) {}
-
-  @override
-  void onNewReinvite(ReInvite event) {}
-
-  @override
-  void registrationStateChanged(RegistrationState state) {
-    print('SIP registration: ${state.state}');
-  }
-
-  @override
-  void transportStateChanged(TransportState state) {
-    print('SIP transport: ${state.state}');
-  }
-
-  @override
-  void onNewNotify(Notify ntf) {}
 }
 
-final sipProvider = NotifierProvider<SipNotifier, void>(SipNotifier.new);
+final vertoProvider =
+    NotifierProvider<VertoNotifier, VertoState>(VertoNotifier.new);
+
+/// Eagerly initialises Telnyx audio on all platforms.
+final telnyxAudioProvider = Provider<void>((ref) {
+  ref.watch(vertoProvider);
+});
