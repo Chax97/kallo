@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../config/telnyx_config.dart';
 import '../services/telnyx_socket_service.dart';
@@ -117,6 +118,19 @@ class VertoNotifier extends Notifier<VertoState> {
   Future<void> acceptCall() async {
     // Transition immediately so ring screen dismisses on first tap
     state = state.copyWith(call: VertoCallState.active);
+
+    // Mark call as answered by app before WebRTC negotiation so the
+    // voicemail webhook sees answered_by = 'app' on call.answered
+    final callControlId = _webrtc.inboundCallControlId;
+    if (callControlId != null) {
+      final err = await Supabase.instance.client
+          .from('call_logs')
+          .update({'answered_by': 'app'})
+          .eq('call_control_id', callControlId)
+          .then((_) => null, onError: (e) => e);
+      if (err != null) debugPrint('acceptCall: DB update error: $err');
+    }
+
     await _webrtc.acceptCall();
   }
 
@@ -127,10 +141,36 @@ class VertoNotifier extends Notifier<VertoState> {
       clearNumber: true,
       muted: false,
     );
+    // Hang up the Call Control leg FIRST (awaited) so Telnyx stops retrying
+    // before the WebSocket bye is sent
+    final callControlId = _webrtc.inboundCallControlId;
+    if (callControlId != null) {
+      try {
+        await Supabase.instance.client.functions.invoke(
+          'telnyx-hangup',
+          body: {'call_control_id': callControlId},
+        );
+        debugPrint('Call Control decline sent for $callControlId');
+      } catch (e) {
+        debugPrint('Call Control decline error: $e');
+      }
+    }
     await _webrtc.declineCall();
   }
 
   Future<void> hangup() async {
+    // Also hang up via Call Control API if we have a control ID
+    final callControlId = _webrtc.activeCallControlId;
+    if (callControlId != null) {
+      try {
+        await Supabase.instance.client.functions.invoke(
+          'telnyx-hangup',
+          body: {'call_control_id': callControlId},
+        );
+      } catch (e) {
+        debugPrint('Call Control hangup error: $e');
+      }
+    }
     await _webrtc.hangup();
     state = state.copyWith(
       call: VertoCallState.idle,

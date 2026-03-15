@@ -16,9 +16,14 @@ class TelnyxWebRTCService {
   bool get hasRemoteRenderer => _remoteRenderer != null;
   RTCVideoRenderer get remoteRenderer => _remoteRenderer!;
   String? _callId;
+  String? _callControlId;
+  String? get activeCallControlId => _callControlId;
+  String? _inboundCallControlId;
+  String? get inboundCallControlId => _inboundCallControlId;
   String? _inboundSdp;
   String? _inboundCallerNumber;
-  DateTime? _declinedAt;
+  String? _inboundSessionId;
+  final Set<String> _dismissedSessions = {};
 
   // Callbacks
   Function(String callId, String callerNumber)? onIncomingCall;
@@ -54,29 +59,42 @@ class TelnyxWebRTCService {
   // ── Incoming call ────────────────────────────────────────────────────────
 
   void _handleIncomingCall(Map<String, dynamic>? params) {
-    // Ignore retried invites for 8 seconds after a decline
-    if (_declinedAt != null &&
-        DateTime.now().difference(_declinedAt!).inSeconds < 8) {
-      final callId = params?['callID'] as String?;
-      debugPrint('🔥 Ignoring retried invite (declined ${DateTime.now().difference(_declinedAt!).inSeconds}s ago), callId: $callId');
-      _socket.sendMessage({
-        'jsonrpc': '2.0',
-        'id': _uuid.v4(),
-        'method': 'telnyx_rtc.bye',
-        'params': {
-          'sessid': _socket.sessionId,
-          'callID': callId,
-          'dialogParams': {'callID': callId},
-        },
-      });
+    final sessionId = params?['telnyx_session_id'] as String?;
+    final callId = params?['callID'] as String?;
+
+    // Invite for a session the user already dismissed — send bye and ignore
+    if (sessionId != null && _dismissedSessions.contains(sessionId)) {
+      debugPrint('🔥 Invite for dismissed session $sessionId — sending bye and ignoring');
+      if (callId != null) {
+        _socket.sendMessage({
+          'jsonrpc': '2.0',
+          'id': _uuid.v4(),
+          'method': 'telnyx_rtc.bye',
+          'params': {
+            'sessid': _socket.sessionId,
+            'callID': callId,
+            'dialogParams': {'callID': callId},
+          },
+        });
+      }
       return;
     }
-    _callId = params?['callID'] as String?;
+
+    // Ignore duplicate invites for the same active session
+    if (_inboundSessionId != null && _inboundSessionId == sessionId) {
+      debugPrint('🔥 Duplicate invite for session $sessionId — ignoring');
+      return;
+    }
+
+    _inboundSessionId = sessionId;
+    _callId = callId;
     _inboundSdp = params?['sdp'] as String?;
+    _inboundCallControlId = params?['telnyx_call_control_id'] as String?;
     _inboundCallerNumber = params?['caller_id_number'] as String?
         ?? params?['callerIdNumber'] as String?
         ?? 'Unknown';
-    debugPrint('Incoming call from $_inboundCallerNumber, callId: $_callId');
+
+    debugPrint('Incoming call from $_inboundCallerNumber, callId: $_callId, sessionId: $_inboundSessionId, callControlId: $_inboundCallControlId');
     onIncomingCall?.call(_callId ?? '', _inboundCallerNumber!);
   }
 
@@ -118,18 +136,29 @@ class TelnyxWebRTCService {
   }
 
   Future<void> declineCall() async {
-    _declinedAt = DateTime.now();
-    _socket.sendMessage({
-      'jsonrpc': '2.0',
-      'id': _uuid.v4(),
-      'method': 'telnyx_rtc.bye',
-      'params': {
-        'sessid': _socket.sessionId,
-        'callID': _callId,
-        'dialogParams': {'callID': _callId},
-      },
-    });
-    await _cleanup();
+    // Add session to dismissed set so future retried invites are rejected
+    if (_inboundSessionId != null) {
+      _dismissedSessions.add(_inboundSessionId!);
+      final sessionId = _inboundSessionId!;
+      Future.delayed(const Duration(seconds: 60), () {
+        _dismissedSessions.remove(sessionId);
+      });
+    }
+
+    if (_callId != null) {
+      _socket.sendMessage({
+        'jsonrpc': '2.0',
+        'id': _uuid.v4(),
+        'method': 'telnyx_rtc.bye',
+        'params': {
+          'sessid': _socket.sessionId,
+          'callID': _callId,
+          'dialogParams': {'callID': _callId},
+        },
+      });
+    }
+
+    await _cleanup(clearSession: true);
   }
 
   // ── Outbound call ────────────────────────────────────────────────────────
@@ -206,16 +235,22 @@ class TelnyxWebRTCService {
         'jsonrpc': '2.0',
         'id': _uuid.v4(),
         'method': 'telnyx_rtc.bye',
-        'params': {'callID': _callId},
+        'params': {
+          'sessid': _socket.sessionId,
+          'callID': _callId,
+          'dialogParams': {'callID': _callId},
+        },
       });
     }
-    await _cleanup();
+    await _cleanup(clearSession: true);
   }
 
   // ── Handle answer/media/bye ──────────────────────────────────────────────
 
   void _handleCallAnswered(Map<String, dynamic>? params) async {
     print('🔥 WebRTC: call answered');
+    _callControlId = params?['telnyx_call_control_id'] as String?;
+    debugPrint('🔥 Call Control ID: $_callControlId');
     final sdp = params?['sdp'] as String?;
     if (sdp != null && _peerConnection != null) {
       await _peerConnection!.setRemoteDescription(
@@ -261,8 +296,14 @@ class TelnyxWebRTCService {
 
   void _handleCallEnded() async {
     print('🔥 WebRTC: call ended');
-    await _cleanup();
-    onCallEnded?.call();
+    // Only clean up if we were in an active call — don't let bye events from
+    // ignored duplicate invites clear state for the call we're still ringing
+    if (_callId != null) {
+      await _cleanup();
+      onCallEnded?.call();
+    } else {
+      debugPrint('🔥 _handleCallEnded: no active call, ignoring bye');
+    }
   }
 
   // ── Peer connection setup ────────────────────────────────────────────────
@@ -343,7 +384,8 @@ class TelnyxWebRTCService {
     };
   }
 
-  Future<void> _cleanup() async {
+  Future<void> _cleanup({bool clearSession = false}) async {
+    if (clearSession) _inboundSessionId = null;
     _remoteStream = null;
     _remoteRenderer?.srcObject = null;
     await _remoteRenderer?.dispose();
@@ -354,9 +396,10 @@ class TelnyxWebRTCService {
     await _peerConnection?.close();
     _peerConnection = null;
     _callId = null;
+    _callControlId = null;
+    _inboundCallControlId = null;
     _inboundSdp = null;
     _inboundCallerNumber = null;
-    // _declinedAt is intentionally not cleared here — it persists to block retries
   }
 
   void toggleMute() {
