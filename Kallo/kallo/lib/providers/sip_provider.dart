@@ -6,13 +6,14 @@ import '../config/telnyx_config.dart';
 import '../services/telnyx_socket_service.dart';
 import '../services/telnyx_webrtc_service.dart';
 
-enum VertoCallState { idle, dialing, ringing, active }
+enum VertoCallState { idle, dialing, ringing, inbound, active }
 
 class VertoState {
   final bool connected;
   final bool loggedIn;
   final VertoCallState call;
   final String? activeNumber;
+  final String? inboundCallerNumber;
   final bool muted;
 
   const VertoState({
@@ -20,6 +21,7 @@ class VertoState {
     this.loggedIn = false,
     this.call = VertoCallState.idle,
     this.activeNumber,
+    this.inboundCallerNumber,
     this.muted = false,
   });
 
@@ -28,6 +30,7 @@ class VertoState {
     bool? loggedIn,
     VertoCallState? call,
     String? activeNumber,
+    String? inboundCallerNumber,
     bool clearNumber = false,
     bool? muted,
   }) {
@@ -36,6 +39,7 @@ class VertoState {
       loggedIn: loggedIn ?? this.loggedIn,
       call: call ?? this.call,
       activeNumber: clearNumber ? null : (activeNumber ?? this.activeNumber),
+      inboundCallerNumber: inboundCallerNumber ?? this.inboundCallerNumber,
       muted: muted ?? this.muted,
     );
   }
@@ -60,6 +64,13 @@ class VertoNotifier extends Notifier<VertoState> {
 
     _webrtc.onCallAnswered = () {
       state = state.copyWith(call: VertoCallState.active);
+    };
+
+    _webrtc.onIncomingCall = (callId, callerNumber) {
+      state = state.copyWith(
+        call: VertoCallState.inbound,
+        inboundCallerNumber: callerNumber,
+      );
     };
 
     _webrtc.onCallEnded = () {
@@ -101,6 +112,20 @@ class VertoNotifier extends Notifier<VertoState> {
       debugPrint('WebRTC dial error: $e');
       state = state.copyWith(call: VertoCallState.idle, clearNumber: true);
     }
+  }
+
+  Future<void> acceptCall() async {
+    state = state.copyWith(call: VertoCallState.active);
+    await _webrtc.acceptCall();
+  }
+
+  Future<void> declineCall() async {
+    await _webrtc.declineCall();
+    state = state.copyWith(
+      call: VertoCallState.idle,
+      clearNumber: true,
+      muted: false,
+    );
   }
 
   Future<void> hangup() async {

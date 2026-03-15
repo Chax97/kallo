@@ -16,6 +16,8 @@ class TelnyxWebRTCService {
   bool get hasRemoteRenderer => _remoteRenderer != null;
   RTCVideoRenderer get remoteRenderer => _remoteRenderer!;
   String? _callId;
+  String? _inboundSdp;
+  String? _inboundCallerNumber;
 
   // Callbacks
   Function(String callId, String callerNumber)? onIncomingCall;
@@ -52,16 +54,19 @@ class TelnyxWebRTCService {
 
   void _handleIncomingCall(Map<String, dynamic>? params) {
     _callId = params?['callID'] as String?;
-    final callerNumber = params?['callerIdNumber'] as String? ?? 'Unknown';
-    debugPrint('Incoming call from $callerNumber, callId: $_callId');
-    onIncomingCall?.call(_callId ?? '', callerNumber);
+    _inboundSdp = params?['sdp'] as String?;
+    _inboundCallerNumber = params?['caller_id_number'] as String?
+        ?? params?['callerIdNumber'] as String?
+        ?? 'Unknown';
+    debugPrint('Incoming call from $_inboundCallerNumber, callId: $_callId');
+    onIncomingCall?.call(_callId ?? '', _inboundCallerNumber!);
   }
 
-  Future<void> acceptCall(String callId, String sdpOffer) async {
-    _callId = callId;
+  Future<void> acceptCall() async {
+    if (_callId == null || _inboundSdp == null) return;
     await _setupPeerConnection();
     await _peerConnection!.setRemoteDescription(
-      RTCSessionDescription(sdpOffer, 'offer'),
+      RTCSessionDescription(_inboundSdp!, 'offer'),
     );
     final answer = await _peerConnection!.createAnswer();
     await _peerConnection!.setLocalDescription(answer);
@@ -71,21 +76,24 @@ class TelnyxWebRTCService {
       'id': _uuid.v4(),
       'method': 'telnyx_rtc.answer',
       'params': {
-        'callID': callId,
+        'sessid': _socket.sessionId,
+        'callID': _callId,
         'sdp': answer.sdp,
-        'dialogParams': {
-          'callID': callId,
-        },
+        'dialogParams': {'callID': _callId},
       },
     });
   }
 
-  Future<void> declineCall(String callId) async {
+  Future<void> declineCall() async {
     _socket.sendMessage({
       'jsonrpc': '2.0',
       'id': _uuid.v4(),
       'method': 'telnyx_rtc.bye',
-      'params': {'callID': callId},
+      'params': {
+        'sessid': _socket.sessionId,
+        'callID': _callId,
+        'dialogParams': {'callID': _callId},
+      },
     });
     await _cleanup();
   }
@@ -321,6 +329,8 @@ class TelnyxWebRTCService {
     await _peerConnection?.close();
     _peerConnection = null;
     _callId = null;
+    _inboundSdp = null;
+    _inboundCallerNumber = null;
   }
 
   void toggleMute() {
