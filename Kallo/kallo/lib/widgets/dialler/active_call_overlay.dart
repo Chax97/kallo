@@ -41,6 +41,7 @@ class _ActiveCallOverlayState extends ConsumerState<ActiveCallOverlay> {
   @override
   Widget build(BuildContext context) {
     final tx = ref.watch(telnyxProvider);
+    final verto = ref.watch(vertoProvider);
 
     // Start/stop the timer based on call state
     ref.listen(telnyxProvider, (prev, next) {
@@ -52,9 +53,17 @@ class _ActiveCallOverlayState extends ConsumerState<ActiveCallOverlay> {
         _elapsed = Duration.zero;
       }
     });
+    ref.listen(vertoProvider, (prev, next) {
+      if (next.call == VertoCallState.active && prev?.call != VertoCallState.active) {
+        _startTimer();
+      }
+      if (next.call == VertoCallState.idle) {
+        _timer?.cancel();
+        _elapsed = Duration.zero;
+      }
+    });
 
     // Show inbound ring screen
-    final verto = ref.watch(vertoProvider);
     if (verto.call == VertoCallState.inbound) {
       return _InboundCallScreen(
         callerNumber: verto.inboundCallerNumber ?? 'Unknown',
@@ -63,15 +72,24 @@ class _ActiveCallOverlayState extends ConsumerState<ActiveCallOverlay> {
       );
     }
 
-    final isVisible = tx.call != TxCallState.idle;
+    final isInboundActive = verto.call == VertoCallState.active;
+    final isVisible = tx.call != TxCallState.idle || isInboundActive;
     if (!isVisible) return const SizedBox.shrink();
 
-    final statusLabel = switch (tx.call) {
-      TxCallState.dialing => 'Dialing...',
-      TxCallState.ringing => 'Ringing...',
-      TxCallState.active => _formattedDuration,
-      TxCallState.idle => '',
-    };
+    final statusLabel = isInboundActive
+        ? _formattedDuration
+        : switch (tx.call) {
+            TxCallState.dialing => 'Dialing...',
+            TxCallState.ringing => 'Ringing...',
+            TxCallState.active => _formattedDuration,
+            TxCallState.idle => '',
+          };
+
+    final displayNumber = isInboundActive
+        ? (verto.inboundCallerNumber ?? '')
+        : (tx.activeNumber ?? '');
+
+    final isMuted = isInboundActive ? verto.muted : tx.muted;
 
     return Positioned(
       bottom: 24,
@@ -99,7 +117,7 @@ class _ActiveCallOverlayState extends ConsumerState<ActiveCallOverlay> {
               children: [
                 // Number + status
                 Text(
-                  tx.activeNumber ?? '',
+                  displayNumber,
                   style: GoogleFonts.inter(
                     fontSize: 20,
                     fontWeight: FontWeight.w600,
@@ -121,17 +139,20 @@ class _ActiveCallOverlayState extends ConsumerState<ActiveCallOverlay> {
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     _ControlButton(
-                      icon: tx.muted ? Icons.mic_off : Icons.mic,
-                      label: tx.muted ? 'Unmute' : 'Mute',
-                      color: tx.muted
+                      icon: isMuted ? Icons.mic_off : Icons.mic,
+                      label: isMuted ? 'Unmute' : 'Mute',
+                      color: isMuted
                           ? const Color(0xFFF59E0B)
                           : const Color(0xFF6C63FF),
-                      onTap: () =>
-                          ref.read(telnyxProvider.notifier).toggleMute(),
+                      onTap: () => isInboundActive
+                          ? ref.read(vertoProvider.notifier).toggleMute()
+                          : ref.read(telnyxProvider.notifier).toggleMute(),
                     ),
                     // Hang up
                     GestureDetector(
-                      onTap: () => ref.read(telnyxProvider.notifier).hangup(),
+                      onTap: () => isInboundActive
+                          ? ref.read(vertoProvider.notifier).hangup()
+                          : ref.read(telnyxProvider.notifier).hangup(),
                       child: Container(
                         width: 64,
                         height: 64,

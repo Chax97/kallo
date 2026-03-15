@@ -115,17 +115,19 @@ class VertoNotifier extends Notifier<VertoState> {
   }
 
   Future<void> acceptCall() async {
+    // Transition immediately so ring screen dismisses on first tap
     state = state.copyWith(call: VertoCallState.active);
     await _webrtc.acceptCall();
   }
 
   Future<void> declineCall() async {
-    await _webrtc.declineCall();
+    // Update state immediately so UI dismisses on first press
     state = state.copyWith(
       call: VertoCallState.idle,
       clearNumber: true,
       muted: false,
     );
+    await _webrtc.declineCall();
   }
 
   Future<void> hangup() async {

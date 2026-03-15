@@ -18,6 +18,7 @@ class TelnyxWebRTCService {
   String? _callId;
   String? _inboundSdp;
   String? _inboundCallerNumber;
+  DateTime? _declinedAt;
 
   // Callbacks
   Function(String callId, String callerNumber)? onIncomingCall;
@@ -53,6 +54,23 @@ class TelnyxWebRTCService {
   // ── Incoming call ────────────────────────────────────────────────────────
 
   void _handleIncomingCall(Map<String, dynamic>? params) {
+    // Ignore retried invites for 8 seconds after a decline
+    if (_declinedAt != null &&
+        DateTime.now().difference(_declinedAt!).inSeconds < 8) {
+      final callId = params?['callID'] as String?;
+      debugPrint('🔥 Ignoring retried invite (declined ${DateTime.now().difference(_declinedAt!).inSeconds}s ago), callId: $callId');
+      _socket.sendMessage({
+        'jsonrpc': '2.0',
+        'id': _uuid.v4(),
+        'method': 'telnyx_rtc.bye',
+        'params': {
+          'sessid': _socket.sessionId,
+          'callID': callId,
+          'dialogParams': {'callID': callId},
+        },
+      });
+      return;
+    }
     _callId = params?['callID'] as String?;
     _inboundSdp = params?['sdp'] as String?;
     _inboundCallerNumber = params?['caller_id_number'] as String?
@@ -65,11 +83,26 @@ class TelnyxWebRTCService {
   Future<void> acceptCall() async {
     if (_callId == null || _inboundSdp == null) return;
     await _setupPeerConnection();
+
+    // Patch FreeSWITCH SDP to be WebRTC-compatible
+    final patchedSdp = _inboundSdp!
+        .replaceAll('RTP/SAVPF', 'UDP/TLS/RTP/SAVPF')
+        .replaceAll('a=end-of-candidates\r\n', '');
+    debugPrint('🔥 acceptCall: patched SDP (first 300): ${patchedSdp.substring(0, patchedSdp.length.clamp(0, 300))}');
+
     await _peerConnection!.setRemoteDescription(
-      RTCSessionDescription(_inboundSdp!, 'offer'),
+      RTCSessionDescription(patchedSdp, 'offer'),
     );
     final answer = await _peerConnection!.createAnswer();
     await _peerConnection!.setLocalDescription(answer);
+    debugPrint('🔥 acceptCall: answer SDP set as local — waiting for ICE gathering...');
+
+    // Wait for ICE gathering so all candidates are bundled in the answer SDP.
+    // FreeSWITCH does not support trickle ICE.
+    await _waitForIceGathering();
+
+    final finalDesc = await _peerConnection!.getLocalDescription();
+    debugPrint('🔥 acceptCall: ICE gathering complete, sending telnyx_rtc.answer');
 
     _socket.sendMessage({
       'jsonrpc': '2.0',
@@ -78,13 +111,14 @@ class TelnyxWebRTCService {
       'params': {
         'sessid': _socket.sessionId,
         'callID': _callId,
-        'sdp': answer.sdp,
+        'sdp': finalDesc!.sdp,
         'dialogParams': {'callID': _callId},
       },
     });
   }
 
   Future<void> declineCall() async {
+    _declinedAt = DateTime.now();
     _socket.sendMessage({
       'jsonrpc': '2.0',
       'id': _uuid.v4(),
@@ -217,27 +251,12 @@ class TelnyxWebRTCService {
       return;
     }
 
-    // No peer connection yet — inbound-initiated media flow.
+    // No peer connection yet — this is an inbound media flow.
+    // Store the SDP so acceptCall() can use it, then notify UI of inbound call.
+    debugPrint('🔥 Inbound media flow — storing SDP, waiting for user to answer');
     _callId = callId;
-    await _setupPeerConnection();
-
-    await _peerConnection!.setRemoteDescription(
-      RTCSessionDescription(sdp, 'offer'),
-    );
-    final answer = await _peerConnection!.createAnswer();
-    await _peerConnection!.setLocalDescription(answer);
-
-    _socket.sendMessage({
-      'jsonrpc': '2.0',
-      'id': _uuid.v4(),
-      'method': 'telnyx_rtc.answer',
-      'params': {
-        'callID': callId,
-        'sdp': answer.sdp,
-      },
-    });
-
-    onCallAnswered?.call();
+    _inboundSdp = sdp;
+    // onIncomingCall already fired from telnyx_rtc.invite; don't auto-answer here.
   }
 
   void _handleCallEnded() async {
@@ -256,13 +275,19 @@ class TelnyxWebRTCService {
       'iceServers': [
         {'urls': 'stun:stun.l.google.com:19302'},
         {'urls': 'stun:stun1.l.google.com:19302'},
-        {'urls': 'stun:stun.telnyx.com:8000'},
+        {'urls': 'stun:stun.telnyx.com:3478'},
         {
-          'urls': 'turn:turn.telnyx.com:8000?transport=tcp',
-          'username': 'telnyx',
-          'credential': 'telnyx2013',
+          'urls': 'turn:turn.telnyx.com:3478?transport=tcp',
+          'username': 'testuser',
+          'credential': 'testpassword',
+        },
+        {
+          'urls': 'turn:turn.telnyx.com:3478?transport=udp',
+          'username': 'testuser',
+          'credential': 'testpassword',
         },
       ],
+      'iceTransportPolicy': 'all',
       'sdpSemantics': 'unified-plan',
     };
 
@@ -331,6 +356,7 @@ class TelnyxWebRTCService {
     _callId = null;
     _inboundSdp = null;
     _inboundCallerNumber = null;
+    // _declinedAt is intentionally not cleared here — it persists to block retries
   }
 
   void toggleMute() {
