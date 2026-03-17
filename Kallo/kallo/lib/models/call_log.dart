@@ -11,6 +11,7 @@ class CallLog {
   final String? hangupCause;
   final int? durationSeconds;
   final String? recordingUrl;
+  final String? storagePath;
 
   const CallLog({
     required this.id,
@@ -25,6 +26,7 @@ class CallLog {
     this.hangupCause,
     this.durationSeconds,
     this.recordingUrl,
+    this.storagePath,
   });
 
   factory CallLog.fromJson(Map<String, dynamic> json) => CallLog(
@@ -46,6 +48,7 @@ class CallLog {
         hangupCause: json['hangup_cause'] as String?,
         durationSeconds: json['duration_seconds'] as int?,
         recordingUrl: json['recording_url'] as String?,
+        storagePath: json['storage_path'] as String?,
       );
 
   /// The "other party" number to show in the UI.

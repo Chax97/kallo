@@ -150,6 +150,13 @@ Deno.serve(async (req) => {
         await callControlAction(callData.call_control_id!, "bridge", {
           call_control_id: cs.inbound_call_control_id,
         })
+        // Start recording the inbound (a-leg) — captures both sides after bridge
+        await callControlAction(cs.inbound_call_control_id as string, "record_start", {
+          format: "mp3",
+          channels: "dual",
+          play_beep: false,
+        })
+        console.log("Recording started on inbound leg", cs.inbound_call_control_id)
       } else if (cs?.stage === "voicemail") {
         // Voicemail a-leg answered — play greeting
         console.log("Voicemail call answered — playing greeting")
@@ -262,19 +269,21 @@ Deno.serve(async (req) => {
 
       console.log("call.recording.saved: stage=", cs?.stage, "durationSecs=", durationSecs, "url=", recordingUrl)
 
-      if (recordingUrl && cs?.stage === "voicemail") {
+      const isVoicemail = cs?.stage === "voicemail"
+      let savedStoragePath: string | null = null
+
+      if (recordingUrl) {
         try {
-          console.log("Downloading voicemail recording:", recordingUrl)
+          console.log("Downloading recording:", recordingUrl, "stage=", cs?.stage)
           const audioRes = await fetch(recordingUrl)
           const audioBlob = await audioRes.blob()
-          // Sanitize call_control_id for use as a filename — colons and other
-          // special characters cause path-encoding mismatches in Supabase Storage.
           const safeId = (callData.call_control_id ?? "unknown").replace(/[^a-zA-Z0-9\-_]/g, "_")
           const fileName = `${safeId}-${Date.now()}.mp3`
-          const storagePath = `recordings/${fileName}`
+          const bucket = isVoicemail ? "voicemails" : "call_recordings"
+          const storagePath = isVoicemail ? `recordings/${fileName}` : fileName
 
           const { error: storageError } = await supabase.storage
-            .from("voicemails")
+            .from(bucket)
             .upload(storagePath, audioBlob, {
               contentType: "audio/mpeg",
               upsert: true,
@@ -283,15 +292,18 @@ Deno.serve(async (req) => {
           if (storageError) {
             console.error("Storage error:", storageError.message)
           } else {
-            await supabase.from("voicemails").insert({
-              call_control_id: callData.call_control_id,
-              from_number: (cs.original_from as string) ?? callData.from,
-              to_number: (cs.original_to as string) ?? callData.to,
-              recording_url: recordingUrl,
-              storage_path: storagePath,
-              duration_seconds: durationSecs,
-            })
-            console.log("Voicemail saved to storage:", storagePath)
+            savedStoragePath = storagePath
+            if (isVoicemail) {
+              await supabase.from("voicemails").insert({
+                call_control_id: callData.call_control_id,
+                from_number: (cs.original_from as string) ?? callData.from,
+                to_number: (cs.original_to as string) ?? callData.to,
+                recording_url: recordingUrl,
+                storage_path: storagePath,
+                duration_seconds: durationSecs,
+              })
+            }
+            console.log("Recording saved to storage:", storagePath)
           }
         } catch (e) {
           console.error("Recording error:", e)
@@ -302,9 +314,8 @@ Deno.serve(async (req) => {
         .from("call_logs")
         .update({
           recording_url: recordingUrl,
-          // Lock in "voicemail" state now so call.hangup can't overwrite it
-          // with "missed" if the client_state is somehow unavailable later.
-          ...(cs?.stage === "voicemail" ? { state: "voicemail" } : {}),
+          ...(savedStoragePath ? { storage_path: savedStoragePath } : {}),
+          ...(isVoicemail ? { state: "voicemail" } : {}),
         })
         .eq("call_control_id", callData.call_control_id)
       break

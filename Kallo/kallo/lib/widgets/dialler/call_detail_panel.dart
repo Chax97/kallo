@@ -356,6 +356,7 @@ class _CallEntry extends StatelessWidget {
             const SizedBox(width: 10),
             _RecordingPlayer(
               url: log.recordingUrl!,
+              storagePath: log.storagePath,
               callControlId: log.callControlId,
               fromNumber: log.fromNumber,
               toNumber: log.toNumber,
@@ -372,12 +373,16 @@ class _CallEntry extends StatelessWidget {
 
 class _RecordingPlayer extends StatefulWidget {
   final String url;
+  final String? storagePath;
+  final String storageBucket;
   final String? callControlId;
   final String? fromNumber;
   final String? toNumber;
   final DateTime? startedAt;
   const _RecordingPlayer({
     required this.url,
+    this.storagePath,
+    this.storageBucket = 'call_recordings',
     this.callControlId,
     this.fromNumber,
     this.toNumber,
@@ -394,7 +399,7 @@ class _RecordingPlayerState extends State<_RecordingPlayer> {
   PlayerState _playerState = PlayerState.stopped;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
-  bool _loading = false;
+
   bool _downloading = false;
   bool _downloaded = false;
   String? _storagePath; // cached after first fetch
@@ -447,35 +452,43 @@ class _RecordingPlayerState extends State<_RecordingPlayer> {
       await _player!.pause();
       return;
     }
-    // Resume from cache without re-downloading.
+    // Resume mid-track if paused, otherwise start from cache or fetch.
+    if (_playerState == PlayerState.paused) {
+      await _player!.resume();
+      return;
+    }
     if (_cachedBytes != null) {
       debugPrint('🎵 _toggle: playing from cache (${_cachedBytes!.length} bytes)');
       await _player!.play(BytesSource(_cachedBytes!));
       return;
     }
-    setState(() => _loading = true);
     await _playFromStorage();
   }
 
   /// Fetch the recording from Supabase Storage. Generates a fresh signed URL
   /// on demand so it never expires before playback.
   Future<void> _playFromStorage() async {
-    final ccid = widget.callControlId;
-    if (ccid == null) {
-      debugPrint('🎵 _playFromStorage: no callControlId, cannot fall back');
-      if (mounted) setState(() => _playerInitFailed = true);
-      return;
-    }
     try {
-      debugPrint('🎵 _playFromStorage: querying voicemails for $ccid');
-      final rows = await Supabase.instance.client
-          .from('voicemails')
-          .select('storage_path')
-          .eq('call_control_id', ccid)
-          .limit(1);
-      final path = rows.isNotEmpty
-          ? rows.first['storage_path'] as String?
-          : null;
+      // Use storage_path from call_logs directly if available.
+      String? path = widget.storagePath ?? _storagePath;
+
+      // Fall back to querying voicemails table (older recordings).
+      if (path == null) {
+        final ccid = widget.callControlId;
+        if (ccid == null) {
+          debugPrint('🎵 _playFromStorage: no storagePath or callControlId');
+          if (mounted) setState(() => _playerInitFailed = true);
+          return;
+        }
+        debugPrint('🎵 _playFromStorage: querying voicemails for $ccid');
+        final rows = await Supabase.instance.client
+            .from('voicemails')
+            .select('storage_path')
+            .eq('call_control_id', ccid)
+            .limit(1);
+        path = rows.isNotEmpty ? rows.first['storage_path'] as String? : null;
+      }
+
       if (path == null) {
         debugPrint('🎵 _playFromStorage: no storage_path found');
         if (mounted) setState(() => _playerInitFailed = true);
@@ -498,7 +511,7 @@ class _RecordingPlayerState extends State<_RecordingPlayer> {
   Future<Uint8List?> _fetchBytes(String storagePath) async {
     try {
       final signed = await Supabase.instance.client.storage
-          .from('voicemails')
+          .from(widget.storageBucket)
           .createSignedUrl(storagePath, 3600);
       final client = HttpClient();
       final request = await client.getUrl(Uri.parse(signed));
@@ -642,32 +655,14 @@ class _RecordingPlayerState extends State<_RecordingPlayer> {
                 : Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            if (_loading)
-                              const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 1.5,
-                                  color: Color(0xFF7C75F0),
-                                ),
-                              ),
-                            Icon(
-                              _loading || _isPlaying ? Icons.pause : Icons.play_arrow,
-                              size: _loading ? 9 : 14,
-                              color: const Color(0xFF7C75F0),
-                            ),
-                          ],
-                        ),
+                      Icon(
+                        _isPlaying ? Icons.pause : Icons.play_arrow,
+                        size: 14,
+                        color: const Color(0xFF7C75F0),
                       ),
                       const SizedBox(width: 4),
                       Text(
-                        _loading ? 'Loading' : _isPlaying ? 'Pause' : 'Play',
+                        _isPlaying ? 'Pause' : 'Play',
                         style: GoogleFonts.dmSans(
                           fontSize: 11,
                           fontWeight: FontWeight.w500,

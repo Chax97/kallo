@@ -9,6 +9,7 @@ import '../widgets/dialler/call_detail_panel.dart';
 import '../widgets/dialler/call_list_panel.dart';
 import '../widgets/dialler/floating_dialer.dart';
 import '../widgets/dialler/kallo_sidebar.dart';
+import '../widgets/dialler/contacts_panel.dart';
 import '../widgets/dialler/kallo_top_bar.dart';
 
 class DiallerDashboard extends ConsumerWidget {
@@ -51,6 +52,7 @@ class DiallerDashboard extends ConsumerWidget {
                         children: const [
                           CallListPanel(),
                           Expanded(child: CallDetailPanel()),
+                          ContactsPanel(),
                         ],
                       ),
                     ),
