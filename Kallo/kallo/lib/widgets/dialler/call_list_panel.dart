@@ -308,6 +308,19 @@ class _CallerRowState extends ConsumerState<_CallerRow> {
     final dur = _duration(log.durationSeconds);
     final time = _relativeTime(log.startedAt);
 
+    final contacts = ref.watch(contactsProvider).when(
+          data: (d) => d,
+          loading: () => const <Contact>[],
+          error: (_, _) => const <Contact>[],
+        );
+    final matchedContact = contacts.firstWhere(
+      (c) => c.phoneNumber == number || c.mobileNumber == number,
+      orElse: () => Contact(id: '', name: ''),
+    );
+    final displayName =
+        matchedContact.id.isNotEmpty ? matchedContact.name : null;
+    final isSaved = displayName != null;
+
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
@@ -344,7 +357,9 @@ class _CallerRowState extends ConsumerState<_CallerRow> {
                 ),
                 child: Center(
                   child: Text(
-                    _initials(number),
+                    isSaved
+                        ? displayName[0].toUpperCase()
+                        : _initials(number),
                     style: GoogleFonts.dmMono(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
@@ -362,16 +377,31 @@ class _CallerRowState extends ConsumerState<_CallerRow> {
                     Row(
                       children: [
                         Expanded(
-                          child: Text(
-                            number,
-                            style: GoogleFonts.dmSans(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: log.state == 'missed'
-                                  ? const Color(0xFFEF4444)
-                                  : Colors.white.withValues(alpha: 0.9),
-                            ),
-                            overflow: TextOverflow.ellipsis,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                displayName ?? number,
+                                style: GoogleFonts.dmSans(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: log.state == 'missed'
+                                      ? const Color(0xFFEF4444)
+                                      : Colors.white.withValues(alpha: 0.9),
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              if (isSaved) ...[
+                                Text(
+                                  number,
+                                  style: GoogleFonts.dmMono(
+                                    fontSize: 10,
+                                    color: Colors.white.withValues(alpha: 0.3),
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ],
                           ),
                         ),
                         // Call count badge
@@ -458,13 +488,6 @@ class _CallerRowState extends ConsumerState<_CallerRow> {
               ),
               // Save contact button — only for unsaved numbers
               Builder(builder: (context) {
-                final contacts = ref.watch(contactsProvider).when(
-                      data: (d) => d,
-                      loading: () => const <Contact>[],
-                      error: (_, _) => const <Contact>[],
-                    );
-                final isSaved = contacts.any((c) =>
-                    c.phoneNumber == number || c.mobileNumber == number);
                 if (isSaved) return const SizedBox.shrink();
                 return AnimatedOpacity(
                   duration: const Duration(milliseconds: 100),
@@ -475,6 +498,7 @@ class _CallerRowState extends ConsumerState<_CallerRow> {
                       onTap: () => showAddContactDialog(
                         context,
                         prefillPhone: number,
+                        onSaved: () => ref.invalidate(contactsProvider),
                       ),
                       child: Container(
                         width: 26,

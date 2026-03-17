@@ -53,7 +53,10 @@ class _ContactsPanelState extends ConsumerState<ContactsPanel> {
                 const Spacer(),
                 _IconBtn(
                   icon: Icons.person_add_outlined,
-                  onTap: () => showAddContactDialog(context),
+                  onTap: () => showAddContactDialog(
+                    context,
+                    onSaved: () => ref.invalidate(contactsProvider),
+                  ),
                 ),
                 const SizedBox(width: 4),
                 _IconBtn(

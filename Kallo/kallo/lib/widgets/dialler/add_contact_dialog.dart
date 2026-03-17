@@ -5,16 +5,19 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 Future<void> showAddContactDialog(
   BuildContext context, {
   String? prefillPhone,
+  VoidCallback? onSaved,
 }) {
   return showDialog(
     context: context,
-    builder: (_) => _AddContactDialog(prefillPhone: prefillPhone),
+    builder: (_) =>
+        _AddContactDialog(prefillPhone: prefillPhone, onSaved: onSaved),
   );
 }
 
 class _AddContactDialog extends StatefulWidget {
   final String? prefillPhone;
-  const _AddContactDialog({this.prefillPhone});
+  final VoidCallback? onSaved;
+  const _AddContactDialog({this.prefillPhone, this.onSaved});
 
   @override
   State<_AddContactDialog> createState() => _AddContactDialogState();
@@ -81,7 +84,10 @@ class _AddContactDialogState extends State<_AddContactDialog> {
           'mobile_number': _mobile.text.trim(),
         if (_selectedPhoneBook != null) 'phone_book': _selectedPhoneBook,
       });
-      if (mounted) Navigator.of(context).pop();
+      if (mounted) {
+        widget.onSaved?.call();
+        Navigator.of(context).pop();
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _saving = false);
