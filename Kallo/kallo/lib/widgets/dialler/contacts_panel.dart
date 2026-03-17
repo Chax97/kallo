@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../models/contact.dart';
 import '../../providers/contact_provider.dart';
 import '../../providers/telnyx_provider.dart';
+import 'add_contact_dialog.dart';
 
 class ContactsPanel extends ConsumerStatefulWidget {
   const ContactsPanel({super.key});
@@ -50,6 +51,11 @@ class _ContactsPanelState extends ConsumerState<ContactsPanel> {
                   ),
                 ),
                 const Spacer(),
+                _IconBtn(
+                  icon: Icons.person_add_outlined,
+                  onTap: () => showAddContactDialog(context),
+                ),
+                const SizedBox(width: 4),
                 _IconBtn(
                   icon: Icons.refresh,
                   onTap: () => ref.invalidate(contactsProvider),
@@ -126,7 +132,12 @@ class _ContactsPanelState extends ConsumerState<ContactsPanel> {
                     : contacts
                         .where((c) =>
                             c.name.toLowerCase().contains(_query) ||
-                            (c.phoneNumber?.contains(_query) ?? false))
+                            (c.companyName?.toLowerCase().contains(_query) ??
+                                false) ||
+                            (c.phoneBook?.toLowerCase().contains(_query) ??
+                                false) ||
+                            (c.phoneNumber?.contains(_query) ?? false) ||
+                            (c.mobileNumber?.contains(_query) ?? false))
                         .toList();
 
                 if (filtered.isEmpty) {
@@ -226,7 +237,7 @@ class _ContactRowState extends ConsumerState<_ContactRow> {
               ),
             ),
             const SizedBox(width: 10),
-            // Name + number
+            // Name + details
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -239,6 +250,16 @@ class _ContactRowState extends ConsumerState<_ContactRow> {
                         color: Colors.white.withValues(alpha: 0.85)),
                     overflow: TextOverflow.ellipsis,
                   ),
+                  if (c.companyName != null) ...[
+                    const SizedBox(height: 1),
+                    Text(
+                      c.companyName!,
+                      style: GoogleFonts.dmSans(
+                          fontSize: 10,
+                          color: Colors.white.withValues(alpha: 0.45)),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                   if (c.phoneNumber != null) ...[
                     const SizedBox(height: 1),
                     Text(
@@ -247,6 +268,38 @@ class _ContactRowState extends ConsumerState<_ContactRow> {
                           fontSize: 10,
                           color: Colors.white.withValues(alpha: 0.3)),
                       overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                  if (c.mobileNumber != null) ...[
+                    const SizedBox(height: 1),
+                    Text(
+                      c.mobileNumber!,
+                      style: GoogleFonts.dmMono(
+                          fontSize: 10,
+                          color: Colors.white.withValues(alpha: 0.25)),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                  if (c.phoneBook != null) ...[
+                    const SizedBox(height: 2),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF5B52E8).withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                            color:
+                                const Color(0xFF5B52E8).withValues(alpha: 0.25)),
+                      ),
+                      child: Text(
+                        c.phoneBook!,
+                        style: GoogleFonts.dmSans(
+                            fontSize: 9,
+                            color: const Color(0xFF5B52E8)
+                                .withValues(alpha: 0.8)),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ],
                 ],

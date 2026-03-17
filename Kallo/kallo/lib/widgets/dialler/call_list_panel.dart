@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../models/call_log.dart';
+import '../../models/contact.dart';
+import '../../providers/contact_provider.dart';
 import '../../providers/dialler_providers.dart';
+import 'add_contact_dialog.dart';
 
 enum _CallFilter { all, missed, voicemail }
 
@@ -237,7 +240,7 @@ class CallListPanel extends ConsumerWidget {
 
 // ── Caller row ───────────────────────────────────────────────────────────────
 
-class _CallerRow extends StatefulWidget {
+class _CallerRow extends ConsumerStatefulWidget {
   final CallerGroup group;
   final bool isSelected;
   final VoidCallback onTap;
@@ -246,10 +249,10 @@ class _CallerRow extends StatefulWidget {
       {required this.group, required this.isSelected, required this.onTap});
 
   @override
-  State<_CallerRow> createState() => _CallerRowState();
+  ConsumerState<_CallerRow> createState() => _CallerRowState();
 }
 
-class _CallerRowState extends State<_CallerRow> {
+class _CallerRowState extends ConsumerState<_CallerRow> {
   bool _hovered = false;
 
   static Color _latestColor(CallLog log) {
@@ -453,6 +456,43 @@ class _CallerRowState extends State<_CallerRow> {
                   color: Colors.white.withValues(alpha: 0.25),
                 ),
               ),
+              // Save contact button — only for unsaved numbers
+              Builder(builder: (context) {
+                final contacts = ref.watch(contactsProvider).when(
+                      data: (d) => d,
+                      loading: () => const <Contact>[],
+                      error: (_, _) => const <Contact>[],
+                    );
+                final isSaved = contacts.any((c) =>
+                    c.phoneNumber == number || c.mobileNumber == number);
+                if (isSaved) return const SizedBox.shrink();
+                return AnimatedOpacity(
+                  duration: const Duration(milliseconds: 100),
+                  opacity: _hovered ? 1.0 : 0.0,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: GestureDetector(
+                      onTap: () => showAddContactDialog(
+                        context,
+                        prefillPhone: number,
+                      ),
+                      child: Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF5B52E8).withValues(alpha: 0.12),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: const Color(0xFF5B52E8)
+                                  .withValues(alpha: 0.3)),
+                        ),
+                        child: const Icon(Icons.person_add_outlined,
+                            size: 12, color: Color(0xFF5B52E8)),
+                      ),
+                    ),
+                  ),
+                );
+              }),
             ],
           ),
         ),

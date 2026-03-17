@@ -22,7 +22,7 @@ class CallDetailPanel extends ConsumerWidget {
 
     return callsAsync.when(
       loading: () => const _EmptyState(),
-      error: (_, __) => const _EmptyState(),
+      error: (_, _) => const _EmptyState(),
       data: (logs) {
         final number =
             selectedNumber ?? (logs.isNotEmpty ? logs.first.displayNumber : null);
@@ -356,6 +356,7 @@ class _CallEntry extends StatelessWidget {
             const SizedBox(width: 10),
             _RecordingPlayer(
               url: log.recordingUrl!,
+              storageBucket: 'call_recordings',
               storagePath: log.storagePath,
               callControlId: log.callControlId,
               fromNumber: log.fromNumber,
@@ -381,8 +382,8 @@ class _RecordingPlayer extends StatefulWidget {
   final DateTime? startedAt;
   const _RecordingPlayer({
     required this.url,
+    required this.storageBucket,
     this.storagePath,
-    this.storageBucket = 'call_recordings',
     this.callControlId,
     this.fromNumber,
     this.toNumber,

@@ -192,7 +192,7 @@ class _GreetingSectionState extends ConsumerState<_GreetingSection> {
             _GreetingState.idle => greetingAsync.when(
                 loading: () => const SizedBox(height: 36,
                     child: Center(child: CircularProgressIndicator(strokeWidth: 1.5, color: Color(0xFF7C75F0)))),
-                error: (_, __) => _buildNoGreeting(),
+                error: (_, _) => _buildNoGreeting(),
                 data: (exists) => exists ? _buildHasGreeting() : _buildNoGreeting(),
               ),
           },
@@ -329,7 +329,7 @@ class _InboxSection extends ConsumerWidget {
             loading: () => Text('Inbox',
                 style: GoogleFonts.dmSans(fontSize: 11, fontWeight: FontWeight.w600,
                     color: Colors.white.withValues(alpha: 0.3), letterSpacing: 0.8)),
-            error: (_, __) => Text('Inbox',
+            error: (_, _) => Text('Inbox',
                 style: GoogleFonts.dmSans(fontSize: 11, fontWeight: FontWeight.w600,
                     color: Colors.white.withValues(alpha: 0.3), letterSpacing: 0.8)),
             data: (vms) => Text('Inbox (${vms.length})',

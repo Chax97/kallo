@@ -2,6 +2,9 @@ class Contact {
   final String id;
   final String name;
   final String? phoneNumber;
+  final String? mobileNumber;
+  final String? companyName;
+  final String? phoneBook;
   final String? email;
   final DateTime? createdAt;
 
@@ -9,6 +12,9 @@ class Contact {
     required this.id,
     required this.name,
     this.phoneNumber,
+    this.mobileNumber,
+    this.companyName,
+    this.phoneBook,
     this.email,
     this.createdAt,
   });
@@ -17,6 +23,9 @@ class Contact {
         id: json['id'] as String,
         name: json['name'] as String,
         phoneNumber: json['phone_number'] as String?,
+        mobileNumber: json['mobile_number'] as String?,
+        companyName: json['company_name'] as String?,
+        phoneBook: json['phone_book'] as String?,
         email: json['email'] as String?,
         createdAt: json['created_at'] != null
             ? DateTime.parse(json['created_at'] as String)
