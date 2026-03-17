@@ -5,11 +5,11 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../providers/sip_provider.dart' show vertoProvider;
 import '../providers/telnyx_provider.dart';
 import '../widgets/dialler/active_call_overlay.dart';
+import '../widgets/dialler/call_detail_panel.dart';
 import '../widgets/dialler/call_list_panel.dart';
 import '../widgets/dialler/floating_dialer.dart';
-import '../widgets/dialler/main_content_area.dart';
-import '../widgets/dialler/sidebar.dart';
-import '../widgets/dialler/top_bar.dart';
+import '../widgets/dialler/kallo_sidebar.dart';
+import '../widgets/dialler/kallo_top_bar.dart';
 
 class DiallerDashboard extends ConsumerWidget {
   const DiallerDashboard({super.key});
@@ -20,14 +20,12 @@ class DiallerDashboard extends ConsumerWidget {
     ref.watch(vertoProvider);
 
     return Scaffold(
+      backgroundColor: const Color(0xFF0D0D14),
       body: Stack(
         children: [
-          // ── Invisible audio renderer (required for WebRTC audio on Windows)
+          // ── Invisible WebRTC audio renderer ──────────────────────────
           Positioned(
-            left: 0,
-            top: 0,
-            width: 1,
-            height: 1,
+            left: 0, top: 0, width: 1, height: 1,
             child: Consumer(
               builder: (context, ref, _) {
                 ref.watch(vertoProvider);
@@ -40,19 +38,19 @@ class DiallerDashboard extends ConsumerWidget {
               },
             ),
           ),
-          // ── Main layout ──────────────────────────────────────────────────
+          // ── Main layout ───────────────────────────────────────────────
           Row(
             children: [
-              const DiallerSidebar(),
+              const KalloSidebar(),
               Expanded(
                 child: Column(
                   children: [
-                    const DiallerTopBar(),
+                    const KalloTopBar(),
                     Expanded(
                       child: Row(
                         children: const [
-                          Expanded(child: MainContentArea()),
                           CallListPanel(),
+                          Expanded(child: CallDetailPanel()),
                         ],
                       ),
                     ),
@@ -61,6 +59,7 @@ class DiallerDashboard extends ConsumerWidget {
               ),
             ],
           ),
+          // ── Active call overlay ───────────────────────────────────────
           const FloatingDialer(),
           const ActiveCallOverlay(),
         ],

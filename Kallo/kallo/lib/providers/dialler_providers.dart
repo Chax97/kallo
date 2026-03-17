@@ -87,15 +87,13 @@ final callHistoryProvider = StreamProvider.autoDispose<List<CallLog>>((ref) {
     final response = await supabase
         .from('call_logs')
         .select()
+        // Exclude internal SIP forwarding legs — their to_number is a sip: URI.
+        .not('to_number', 'ilike', 'sip:%')
         .order('started_at', ascending: false)
         .limit(200);
-    controller.add((response as List)
-        .map((e) => CallLog.fromJson(e as Map<String, dynamic>))
-        .toList());
     final logs = (response as List)
-      .map((e) => CallLog.fromJson(e as Map<String, dynamic>))
-      .toList();
-    print('Fetched ${logs.length} call logs'); // add this
+        .map((e) => CallLog.fromJson(e as Map<String, dynamic>))
+        .toList();
     controller.add(logs);
   }
 

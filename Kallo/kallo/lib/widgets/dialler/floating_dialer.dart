@@ -5,6 +5,12 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../providers/dialler_providers.dart';
 import '../../providers/telnyx_provider.dart';
 
+const _kPanelWidth = 280.0;
+// Used only for drag clamping — actual height is determined by the Column layout.
+const _kPanelEstH = 370.0;
+const _kBubbleSize = 52.0;
+const _kEdge = 8.0;
+
 class FloatingDialer extends ConsumerStatefulWidget {
   const FloatingDialer({super.key});
 
@@ -13,12 +19,12 @@ class FloatingDialer extends ConsumerStatefulWidget {
 }
 
 class _FloatingDialerState extends ConsumerState<FloatingDialer> {
+  // Top-left of the entire combined widget (panel + bubble column).
   Offset _position = const Offset(120, 80);
-  bool _minimized = false;
+  bool _open = false;
+  bool _openAbove = false;
 
   static const _callerIds = ['1234', '5678', '9012', '3456'];
-  static const _devices = ['This Device', 'SIP Phone', 'Web Phone'];
-  String _device = 'This Device';
 
   static const _keys = [
     ('1', ''),
@@ -35,277 +41,331 @@ class _FloatingDialerState extends ConsumerState<FloatingDialer> {
     ('#', ''),
   ];
 
-  void _onPanUpdate(DragUpdateDetails d) {
+  // ── Toggle ──────────────────────────────────────────────────────────────────
+
+  void _toggle(Size screen) {
+    if (!_open) {
+      // Decide which side has more space and lock it for the session.
+      final spaceAbove = _position.dy - _kEdge;
+      final spaceBelow = screen.height - (_position.dy + _kBubbleSize) - _kEdge;
+      _openAbove = spaceAbove >= spaceBelow;
+
+      // When opening above the bubble shifts _position up so the panel appears
+      // above; the bubble stays at its original screen position.
+      if (_openAbove) {
+        _position = _clamp(
+          Offset(_position.dx, _position.dy - _kPanelEstH),
+          screen,
+          open: true,
+          openAbove: true,
+        );
+      } else {
+        _position = _clamp(_position, screen, open: true, openAbove: false);
+      }
+    } else {
+      // When closing above, restore _position to the bubble's screen position.
+      if (_openAbove) {
+        _position = Offset(_position.dx, _position.dy + _kPanelEstH);
+      }
+    }
+    setState(() => _open = !_open);
+  }
+
+  // ── Drag ────────────────────────────────────────────────────────────────────
+
+  void _onPanUpdate(DragUpdateDetails d, Size screen) {
     setState(() {
-      _position = Offset(
-        _position.dx + d.delta.dx,
-        _position.dy + d.delta.dy,
+      _position = _clamp(
+        Offset(_position.dx + d.delta.dx, _position.dy + d.delta.dy),
+        screen,
+        open: _open,
+        openAbove: _openAbove,
       );
     });
   }
 
+  Offset _clamp(Offset pos, Size screen,
+      {required bool open, required bool openAbove}) {
+    final totalH =
+        open ? _kBubbleSize + _kPanelEstH : _kBubbleSize;
+    return Offset(
+      pos.dx.clamp(_kEdge, screen.width - _kPanelWidth - _kEdge),
+      pos.dy.clamp(_kEdge, (screen.height - totalH - _kEdge).clamp(_kEdge, double.infinity)),
+    );
+  }
+
+  // ── Build ────────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
-    if (_minimized) {
-      return Positioned(
-        left: _position.dx,
-        top: _position.dy,
-        child: GestureDetector(
-          onPanUpdate: _onPanUpdate,
-          onTap: () => setState(() => _minimized = false),
-          child: Container(
-            width: 52,
-            height: 52,
-            decoration: BoxDecoration(
-              color: const Color(0xFF6C63FF),
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF6C63FF).withValues(alpha: 0.45),
-                  blurRadius: 18,
-                  offset: const Offset(0, 6),
-                ),
-              ],
-            ),
-            child: const Icon(Icons.dialpad, color: Colors.white, size: 22),
-          ),
-        ),
-      );
-    }
-
+    final screen = MediaQuery.of(context).size;
     final dialledNumber = ref.watch(dialledNumberProvider);
     final callerId = ref.watch(callerIdProvider);
 
-    return Positioned(
-      left: _position.dx,
-      top: _position.dy,
-      child: Material(
-        color: Colors.transparent,
-        child: Container(
-          width: 290,
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.16),
-                blurRadius: 40,
-                offset: const Offset(0, 10),
-                spreadRadius: -4,
-              ),
-            ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
+    final panel = _buildPanel(dialledNumber, callerId, screen);
+    final bubble = _buildBubble(screen);
+
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          Positioned(
+            left: _position.dx,
+            top: _position.dy,
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              children: [
-                // ── Header (drag handle) ──────────────────────────────────
-                GestureDetector(
-                  onPanUpdate: _onPanUpdate,
-                  behavior: HitTestBehavior.opaque,
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
-                    decoration: const BoxDecoration(
-                      color: Color(0xFFF9FAFB),
-                      border: Border(
-                        bottom: BorderSide(color: Color(0xFFE5E7EB), width: 1),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        // Caller ID selector
-                        Expanded(
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<String>(
-                              value: callerId,
-                              isDense: true,
-                              style: GoogleFonts.inter(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: const Color(0xFF374151),
-                              ),
-                              icon: const Icon(Icons.keyboard_arrow_down,
-                                  size: 14, color: Color(0xFF6B7280)),
-                              onChanged: (v) {
-                                if (v != null) {
-                                  ref.read(callerIdProvider.notifier).set(v);
-                                }
-                              },
-                              items: _callerIds
-                                  .map((id) => DropdownMenuItem(
-                                        value: id,
-                                        child: Text('+$id',
-                                            style: GoogleFonts.inter(
-                                                fontSize: 12,
-                                                color:
-                                                    const Color(0xFF374151))),
-                                      ))
-                                  .toList(),
-                            ),
-                          ),
-                        ),
-                        // Via device selector
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<String>(
-                              value: _device,
-                              isDense: true,
-                              style: GoogleFonts.inter(
-                                fontSize: 11,
-                                color: const Color(0xFF6B7280),
-                              ),
-                              icon: const Icon(Icons.keyboard_arrow_down,
-                                  size: 13, color: Color(0xFF9CA3AF)),
-                              onChanged: (v) {
-                                if (v != null) setState(() => _device = v);
-                              },
-                              items: _devices
-                                  .map((d) => DropdownMenuItem(
-                                        value: d,
-                                        child: Text('via $d',
-                                            style: GoogleFonts.inter(
-                                                fontSize: 11,
-                                                color:
-                                                    const Color(0xFF6B7280))),
-                                      ))
-                                  .toList(),
-                            ),
-                          ),
-                        ),
-                        // Minimize button
-                        GestureDetector(
-                          onTap: () => setState(() => _minimized = true),
-                          child: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFE5E7EB),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: const Icon(Icons.remove,
-                                size: 14, color: Color(0xFF6B7280)),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-                // ── Number display ────────────────────────────────────────
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          dialledNumber.isEmpty
-                              ? 'Enter Name or Number'
-                              : dialledNumber,
-                          style: GoogleFonts.inter(
-                            fontSize: dialledNumber.isEmpty ? 14 : 22,
-                            color: dialledNumber.isEmpty
-                                ? const Color(0xFFD1D5DB)
-                                : const Color(0xFF111827),
-                            fontWeight: dialledNumber.isEmpty
-                                ? FontWeight.w400
-                                : FontWeight.w300,
-                            letterSpacing: dialledNumber.isEmpty ? 0 : 2,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // ── Keypad grid ───────────────────────────────────────────
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  child: GridView.count(
-                    crossAxisCount: 3,
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    mainAxisSpacing: 7,
-                    crossAxisSpacing: 7,
-                    childAspectRatio: 2.0,
-                    children: _keys
-                        .map((k) => _FloatKey(
-                              digit: k.$1,
-                              sub: k.$2,
-                              onTap: () => ref
-                                  .read(dialledNumberProvider.notifier)
-                                  .append(k.$1),
-                            ))
-                        .toList(),
-                  ),
-                ),
-
-                // ── Action row ────────────────────────────────────────────
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // Contacts / voicemail
-                      _OutlineRoundBtn(
-                        icon: Icons.people_outline,
-                        size: 50,
-                        onTap: () {},
-                      ),
-                      // Call button
-                      GestureDetector(
-                        onTap: () {
-                          final number = ref.read(dialledNumberProvider);
-                          if (number.isNotEmpty) {
-                            ref.read(telnyxProvider.notifier).dial(number);
-                          }
-                        },
-                        child: Container(
-                          width: 62,
-                          height: 62,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF22C55E),
-                            shape: BoxShape.circle,
-                            boxShadow: [
-                              BoxShadow(
-                                color: const Color(0xFF22C55E)
-                                    .withValues(alpha: 0.4),
-                                blurRadius: 14,
-                                offset: const Offset(0, 5),
-                              ),
-                            ],
-                          ),
-                          child: const Icon(Icons.call,
-                              color: Colors.white, size: 28),
-                        ),
-                      ),
-                      // Backspace — tap to trim, long-press to clear
-                      GestureDetector(
-                        onTap: () =>
-                            ref.read(dialledNumberProvider.notifier).trimLast(),
-                        onLongPress: () =>
-                            ref.read(dialledNumberProvider.notifier).clear(),
-                        child: Container(
-                          width: 50,
-                          height: 50,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(25),
-                            border:
-                                Border.all(color: const Color(0xFFE5E7EB)),
-                          ),
-                          child: const Icon(Icons.backspace_outlined,
-                              size: 18, color: Color(0xFF6B7280)),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: _open && _openAbove
+                  ? [panel, bubble]
+                  : _open
+                      ? [bubble, panel]
+                      : [bubble],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Bubble ───────────────────────────────────────────────────────────────────
+
+  Widget _buildBubble(Size screen) {
+    // Flatten the corners where the bubble meets the panel.
+    final borderRadius = _open
+        ? BorderRadius.only(
+            topLeft: Radius.circular(_openAbove ? 0 : 26),
+            topRight: Radius.circular(_openAbove ? 0 : 26),
+            bottomLeft: Radius.circular(_openAbove ? 26 : 0),
+            bottomRight: Radius.circular(_openAbove ? 26 : 0),
+          )
+        : BorderRadius.circular(26);
+
+    return GestureDetector(
+      onPanUpdate: (d) => _onPanUpdate(d, screen),
+      onTap: () => _toggle(screen),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: _kBubbleSize,
+        height: _kBubbleSize,
+        decoration: BoxDecoration(
+          color: const Color(0xFF5B52E8),
+          borderRadius: borderRadius,
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF5B52E8).withValues(alpha: 0.4),
+              blurRadius: 16,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Icon(
+          _open ? Icons.close : Icons.phone,
+          color: Colors.white,
+          size: 22,
+        ),
+      ),
+    );
+  }
+
+  // ── Panel ─────────────────────────────────────────────────────────────────────
+
+  Widget _buildPanel(String dialledNumber, String callerId, Size screen) {
+    // Round the corners that face away from the bubble.
+    const r = Radius.circular(14);
+    final borderRadius = _openAbove
+        ? const BorderRadius.only(topLeft: r, topRight: r)
+        : const BorderRadius.only(bottomLeft: r, bottomRight: r);
+
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        width: _kPanelWidth,
+        decoration: BoxDecoration(
+          color: const Color(0xFF13131F),
+          borderRadius: borderRadius,
+          border: Border(
+            top: _openAbove
+                ? const BorderSide(color: Color(0xFF2A2A3E))
+                : BorderSide.none,
+            left: const BorderSide(color: Color(0xFF2A2A3E)),
+            right: const BorderSide(color: Color(0xFF2A2A3E)),
+            bottom: _openAbove
+                ? BorderSide.none
+                : const BorderSide(color: Color(0xFF2A2A3E)),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.4),
+              blurRadius: 32,
+              offset: const Offset(0, 8),
+              spreadRadius: -4,
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: borderRadius,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // ── Header / drag handle ────────────────────────────────────
+              GestureDetector(
+                onPanUpdate: (d) => _onPanUpdate(d, screen),
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A1A2E),
+                    borderRadius: _openAbove
+                        ? const BorderRadius.only(topLeft: r, topRight: r)
+                        : BorderRadius.zero,
+                    border: const Border(
+                      bottom: BorderSide(color: Color(0xFF2A2A3E), width: 1),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.drag_indicator,
+                          size: 14,
+                          color: Colors.white.withValues(alpha: 0.2)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: callerId,
+                            isDense: true,
+                            dropdownColor: const Color(0xFF1A1A2E),
+                            style: GoogleFonts.dmSans(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white.withValues(alpha: 0.8),
+                            ),
+                            icon: Icon(Icons.keyboard_arrow_down,
+                                size: 14,
+                                color: Colors.white.withValues(alpha: 0.3)),
+                            onChanged: (v) {
+                              if (v != null) {
+                                ref.read(callerIdProvider.notifier).set(v);
+                              }
+                            },
+                            items: _callerIds
+                                .map((id) => DropdownMenuItem(
+                                      value: id,
+                                      child: Text('+$id',
+                                          style: GoogleFonts.dmSans(
+                                              fontSize: 12,
+                                              color: Colors.white
+                                                  .withValues(alpha: 0.8))),
+                                    ))
+                                .toList(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // ── Number display ────────────────────────────────────────
+              Container(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+                decoration: const BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: Color(0xFF2A2A3E), width: 1),
+                  ),
+                ),
+                child: Text(
+                  dialledNumber.isEmpty ? 'Enter number…' : dialledNumber,
+                  style: GoogleFonts.dmMono(
+                    fontSize: dialledNumber.isEmpty ? 13 : 22,
+                    color: dialledNumber.isEmpty
+                        ? Colors.white.withValues(alpha: 0.2)
+                        : Colors.white.withValues(alpha: 0.9),
+                    fontWeight: FontWeight.w400,
+                    letterSpacing: dialledNumber.isEmpty ? 0 : 2.5,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+
+              // ── Keypad ──────────────────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                child: GridView.count(
+                  crossAxisCount: 3,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  mainAxisSpacing: 6,
+                  crossAxisSpacing: 6,
+                  childAspectRatio: 2.1,
+                  children: _keys
+                      .map((k) => _FloatKey(
+                            digit: k.$1,
+                            sub: k.$2,
+                            onTap: () => ref
+                                .read(dialledNumberProvider.notifier)
+                                .append(k.$1),
+                          ))
+                      .toList(),
+                ),
+              ),
+
+              // ── Action row ────────────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _CircleBtn(
+                      size: 48,
+                      color: const Color(0xFF1A1A2E),
+                      borderColor: const Color(0xFF2A2A3E),
+                      onTap: () =>
+                          ref.read(dialledNumberProvider.notifier).trimLast(),
+                      onLongPress: () =>
+                          ref.read(dialledNumberProvider.notifier).clear(),
+                      child: Icon(Icons.backspace_outlined,
+                          size: 17,
+                          color: Colors.white.withValues(alpha: 0.4)),
+                    ),
+                    GestureDetector(
+                      onTap: () {
+                        final number = ref.read(dialledNumberProvider);
+                        if (number.isNotEmpty) {
+                          ref.read(telnyxProvider.notifier).dial(number);
+                        }
+                      },
+                      child: Container(
+                        width: 58,
+                        height: 58,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF22C55E),
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF22C55E)
+                                  .withValues(alpha: 0.35),
+                              blurRadius: 16,
+                              offset: const Offset(0, 5),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(Icons.call,
+                            color: Colors.white, size: 26),
+                      ),
+                    ),
+                    _CircleBtn(
+                      size: 48,
+                      color: const Color(0xFF1A1A2E),
+                      borderColor: const Color(0xFF2A2A3E),
+                      onTap: () {},
+                      child: Icon(Icons.people_outline,
+                          size: 17,
+                          color: Colors.white.withValues(alpha: 0.4)),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -313,7 +373,8 @@ class _FloatingDialerState extends ConsumerState<FloatingDialer> {
   }
 }
 
-// ── Key button ─────────────────────────────────────────────────────────────────
+// ── Key button ───────────────────────────────────────────────────────────────
+
 class _FloatKey extends StatefulWidget {
   final String digit;
   final String sub;
@@ -341,42 +402,37 @@ class _FloatKeyState extends State<_FloatKey> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 70),
         decoration: BoxDecoration(
-          color: _pressed ? const Color(0xFFEDE9FE) : const Color(0xFFF9FAFB),
-          shape: BoxShape.circle,
+          color: _pressed
+              ? const Color(0xFF5B52E8).withValues(alpha: 0.15)
+              : const Color(0xFF1A1A2E),
+          borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: _pressed
-                ? const Color(0xFF6C63FF)
-                : const Color(0xFFE5E7EB),
+                ? const Color(0xFF5B52E8).withValues(alpha: 0.5)
+                : const Color(0xFF2A2A3E),
           ),
-          boxShadow: _pressed
-              ? []
-              : [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.04),
-                    blurRadius: 3,
-                    offset: const Offset(0, 1),
-                  ),
-                ],
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Text(
               widget.digit,
-              style: GoogleFonts.inter(
-                fontSize: 18,
-                fontWeight: FontWeight.w300,
-                color: const Color(0xFF111827),
+              style: GoogleFonts.dmSans(
+                fontSize: 17,
+                fontWeight: FontWeight.w500,
+                color: _pressed
+                    ? const Color(0xFF5B52E8)
+                    : Colors.white.withValues(alpha: 0.85),
               ),
             ),
             if (widget.sub.isNotEmpty)
               Text(
                 widget.sub,
-                style: GoogleFonts.inter(
+                style: GoogleFonts.dmSans(
                   fontSize: 7,
                   fontWeight: FontWeight.w500,
-                  color: const Color(0xFF9CA3AF),
-                  letterSpacing: 1.0,
+                  color: Colors.white.withValues(alpha: 0.3),
+                  letterSpacing: 0.8,
                 ),
               ),
           ],
@@ -386,35 +442,39 @@ class _FloatKeyState extends State<_FloatKey> {
   }
 }
 
-// ── Outline round button ───────────────────────────────────────────────────────
-class _OutlineRoundBtn extends StatelessWidget {
-  final IconData icon;
-  final double size;
-  final VoidCallback onTap;
+// ── Small circle button ──────────────────────────────────────────────────────
 
-  const _OutlineRoundBtn(
-      {required this.icon, required this.size, required this.onTap});
+class _CircleBtn extends StatelessWidget {
+  final double size;
+  final Color color;
+  final Color borderColor;
+  final Widget child;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  const _CircleBtn({
+    required this.size,
+    required this.color,
+    required this.borderColor,
+    required this.child,
+    required this.onTap,
+    this.onLongPress,
+  });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Container(
         width: size,
         height: size,
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: color,
           shape: BoxShape.circle,
-          border: Border.all(color: const Color(0xFFE5E7EB)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
-              blurRadius: 4,
-              offset: const Offset(0, 1),
-            ),
-          ],
+          border: Border.all(color: borderColor),
         ),
-        child: Icon(icon, size: 20, color: const Color(0xFF6B7280)),
+        child: child,
       ),
     );
   }

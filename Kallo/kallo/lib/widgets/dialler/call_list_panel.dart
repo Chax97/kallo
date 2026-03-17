@@ -3,500 +3,307 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../models/call_log.dart';
-import '../../models/call_record.dart';
 import '../../providers/dialler_providers.dart';
+
+enum _CallFilter { all, missed, voicemail }
+
+// ── Filter provider ──────────────────────────────────────────────────────────
+
+class _CallFilterNotifier extends Notifier<_CallFilter> {
+  @override
+  _CallFilter build() => _CallFilter.all;
+  void set(_CallFilter v) => state = v;
+}
+
+final _callFilterProvider =
+    NotifierProvider<_CallFilterNotifier, _CallFilter>(_CallFilterNotifier.new);
+
+// ── Selected caller provider (shared with detail panel) ──────────────────────
+
+class _SelectedCallerNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void set(String? v) => state = v;
+}
+
+final selectedCallerNumberProvider =
+    NotifierProvider<_SelectedCallerNotifier, String?>(_SelectedCallerNotifier.new);
+
+// ── Caller group model ───────────────────────────────────────────────────────
+
+class CallerGroup {
+  final String number;
+  final List<CallLog> calls; // sorted newest-first
+
+  const CallerGroup(this.number, this.calls);
+
+  CallLog get latest => calls.first;
+  int get totalCount => calls.length;
+  bool get hasMissed => calls.any((c) => c.state == 'missed');
+  bool get hasVoicemail =>
+      calls.any((c) => c.state == 'voicemail' || c.recordingUrl != null);
+}
+
+// ── Panel ────────────────────────────────────────────────────────────────────
 
 class CallListPanel extends ConsumerWidget {
   const CallListPanel({super.key});
 
-  static final List<CallRecord> _calls = [
-    CallRecord(
-      name: 'Jason Markus',
-      number: '+1 (555) 234-5678',
-      type: CallType.outbound,
-      timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
-      duration: const Duration(minutes: 3, seconds: 22),
-      count: 5,
-      initials: 'JM',
-      avatarColor: Color(0xFF6C63FF),
-    ),
-    CallRecord(
-      name: 'Sarah Connor',
-      number: '+1 (555) 987-6543',
-      type: CallType.inbound,
-      timestamp: DateTime.now().subtract(const Duration(minutes: 12)),
-      duration: const Duration(minutes: 7, seconds: 45),
-      count: 2,
-      initials: 'SC',
-      avatarColor: Color(0xFF22C55E),
-    ),
-    CallRecord(
-      name: 'Mike Williams',
-      number: '+1 (555) 456-7890',
-      type: CallType.missed,
-      timestamp: DateTime.now().subtract(const Duration(minutes: 45)),
-      count: 3,
-      initials: 'MW',
-      avatarColor: Color(0xFFEF4444),
-    ),
-    CallRecord(
-      name: 'Emma Thompson',
-      number: '+44 20 7946 0958',
-      type: CallType.outbound,
-      timestamp: DateTime.now().subtract(const Duration(hours: 1)),
-      duration: const Duration(minutes: 12, seconds: 8),
-      count: 1,
-      initials: 'ET',
-      avatarColor: Color(0xFFF59E0B),
-    ),
-    CallRecord(
-      name: 'David Chen',
-      number: '+1 (555) 321-0987',
-      type: CallType.conference,
-      timestamp: DateTime.now().subtract(const Duration(hours: 2)),
-      duration: const Duration(minutes: 45, seconds: 30),
-      count: 2,
-      initials: 'DC',
-      avatarColor: Color(0xFF0EA5E9),
-    ),
-    CallRecord(
-      name: 'Linda Park',
-      number: '+1 (555) 654-3210',
-      type: CallType.missed,
-      timestamp: DateTime.now().subtract(const Duration(hours: 26)),
-      count: 4,
-      initials: 'LP',
-      avatarColor: Color(0xFFEC4899),
-    ),
-    CallRecord(
-      name: 'Robert Smith',
-      number: '+1 (555) 789-0123',
-      type: CallType.inbound,
-      timestamp: DateTime.now().subtract(const Duration(hours: 28)),
-      duration: const Duration(minutes: 2, seconds: 15),
-      count: 1,
-      initials: 'RS',
-      avatarColor: Color(0xFF8B5CF6),
-    ),
-    CallRecord(
-      name: 'Anna Foster',
-      number: '+1 (555) 012-3456',
-      type: CallType.outbound,
-      timestamp: DateTime.now().subtract(const Duration(days: 2)),
-      duration: const Duration(minutes: 18, seconds: 52),
-      count: 6,
-      initials: 'AF',
-      avatarColor: Color(0xFF14B8A6),
-    ),
-  ];
-
-  static const _tabs = ['Favourites', 'Active Call', 'Call History', 'Missed Call'];
-
-  // Index of the Call History tab
-  static const _callHistoryTabIndex = 2;
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final tabIndex = ref.watch(callsTabIndexProvider);
-    final selectedCallIndex = ref.watch(selectedCallIndexProvider);
+    final filter = ref.watch(_callFilterProvider);
+    final callsAsync = ref.watch(callHistoryProvider);
+    final selectedNumber = ref.watch(selectedCallerNumberProvider);
 
     return Container(
-      width: 320,
+      width: 300,
       decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          left: BorderSide(color: Color(0xFFE5E7EB), width: 1),
-        ),
+        color: Color(0xFF0D0D14),
+        border: Border(right: BorderSide(color: Color(0xFF1E1E2E), width: 1)),
       ),
       child: Column(
         children: [
-          // ── Tab bar ─────────────────────────────────────────────────────────
-          Container(
-            height: 44,
-            decoration: const BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: Color(0xFFE5E7EB), width: 1),
-              ),
-            ),
-            child: Row(
+          // ── Header ──────────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ..._tabs.asMap().entries.map((e) {
-                  final isSelected = e.key == tabIndex;
-                  return Expanded(
-                    child: GestureDetector(
-                      onTap: () =>
-                          ref.read(callsTabIndexProvider.notifier).set(e.key),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          border: Border(
-                            bottom: BorderSide(
-                              color: isSelected
-                                  ? const Color(0xFF6C63FF)
-                                  : Colors.transparent,
-                              width: 2,
-                            ),
-                          ),
-                        ),
-                        alignment: Alignment.center,
-                        child: Text(
-                          e.value,
-                          style: GoogleFonts.inter(
-                            fontSize: 11,
-                            fontWeight: isSelected
-                                ? FontWeight.w600
-                                : FontWeight.w400,
-                            color: isSelected
-                                ? const Color(0xFF6C63FF)
-                                : const Color(0xFF9CA3AF),
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                Row(
+                  children: [
+                    Text(
+                      'Calls',
+                      style: GoogleFonts.dmSans(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
                       ),
                     ),
-                  );
-                }),
-                IconButton(
-                  icon: const Icon(Icons.more_horiz,
-                      size: 18, color: Color(0xFF9CA3AF)),
-                  onPressed: () {},
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 44),
+                    const Spacer(),
+                    _TopBarIcon(
+                        icon: Icons.refresh,
+                        onTap: () => ref.invalidate(callHistoryProvider)),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                // ── Search ──────────────────────────────────────────
+                Container(
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF13131F),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFF2A2A3E)),
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 10),
+                      Icon(Icons.search,
+                          size: 14,
+                          color: Colors.white.withValues(alpha: 0.25)),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Search...',
+                        style: GoogleFonts.dmSans(
+                          fontSize: 12,
+                          color: Colors.white.withValues(alpha: 0.2),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+                // ── Filter pills ────────────────────────────────────
+                Row(
+                  children: [
+                    _FilterPill(
+                      label: 'All',
+                      isActive: filter == _CallFilter.all,
+                      onTap: () => ref
+                          .read(_callFilterProvider.notifier)
+                          .set(_CallFilter.all),
+                    ),
+                    const SizedBox(width: 6),
+                    _FilterPill(
+                      label: 'Missed',
+                      isActive: filter == _CallFilter.missed,
+                      onTap: () => ref
+                          .read(_callFilterProvider.notifier)
+                          .set(_CallFilter.missed),
+                      accentColor: const Color(0xFFEF4444),
+                    ),
+                    const SizedBox(width: 6),
+                    _FilterPill(
+                      label: 'Voicemail',
+                      isActive: filter == _CallFilter.voicemail,
+                      onTap: () => ref
+                          .read(_callFilterProvider.notifier)
+                          .set(_CallFilter.voicemail),
+                      accentColor: const Color(0xFF7C75F0),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-          // ── Search bar ──────────────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
-            child: Container(
-              height: 34,
-              decoration: BoxDecoration(
-                color: const Color(0xFFF9FAFB),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFFE5E7EB)),
-              ),
-              child: Row(
-                children: [
-                  const SizedBox(width: 10),
-                  const Icon(Icons.search, size: 15, color: Color(0xFF9CA3AF)),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Search calls...',
-                    style: GoogleFonts.inter(
-                        fontSize: 12, color: const Color(0xFFD1D5DB)),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          // ── List ────────────────────────────────────────────────────────────
+          Container(height: 1, color: const Color(0xFF1E1E2E)),
+          // ── List ────────────────────────────────────────────────────
           Expanded(
-            child: tabIndex == _callHistoryTabIndex
-                ? const _CallHistoryList()
-                : ListView.builder(
-                    itemCount: _calls.length,
-                    itemBuilder: (context, index) {
-                      return _CallItem(
-                        call: _calls[index],
-                        isSelected: selectedCallIndex == index,
-                        onTap: () {
-                          final notifier =
-                              ref.read(selectedCallIndexProvider.notifier);
-                          notifier.set(
-                              selectedCallIndex == index ? null : index);
-                        },
-                        onCall: () => ref
-                            .read(dialledNumberProvider.notifier)
-                            .append(_calls[index].number),
-                      );
-                    },
+            child: callsAsync.when(
+              loading: () => const Center(
+                child: CircularProgressIndicator(
+                  color: Color(0xFF5B52E8),
+                  strokeWidth: 2,
+                ),
+              ),
+              error: (e, _) => Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.error_outline,
+                        color: const Color(0xFFEF4444).withValues(alpha: 0.5),
+                        size: 28),
+                    const SizedBox(height: 8),
+                    Text('Failed to load',
+                        style: GoogleFonts.dmSans(
+                            fontSize: 13,
+                            color: Colors.white.withValues(alpha: 0.3))),
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: () => ref.invalidate(callHistoryProvider),
+                      child: Text('Retry',
+                          style: GoogleFonts.dmSans(
+                              color: const Color(0xFF5B52E8))),
+                    ),
+                  ],
+                ),
+              ),
+              data: (logs) {
+                final groups = _buildGroups(logs, filter);
+                if (groups.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.phone_missed,
+                            size: 32,
+                            color: Colors.white.withValues(alpha: 0.1)),
+                        const SizedBox(height: 10),
+                        Text('No calls yet',
+                            style: GoogleFonts.dmSans(
+                                fontSize: 13,
+                                color: Colors.white.withValues(alpha: 0.25))),
+                      ],
+                    ),
+                  );
+                }
+                return ListView.builder(
+                  itemCount: groups.length,
+                  itemBuilder: (context, i) => _CallerRow(
+                    group: groups[i],
+                    isSelected: selectedNumber == groups[i].number,
+                    onTap: () => ref
+                        .read(selectedCallerNumberProvider.notifier)
+                        .set(groups[i].number),
                   ),
+                );
+              },
+            ),
           ),
         ],
       ),
     );
   }
-}
 
-// ── Call History tab content ──────────────────────────────────────────────────
+  /// Groups logs by displayNumber, applies filter at the group level,
+  /// and returns groups sorted by most-recent call first.
+  List<CallerGroup> _buildGroups(List<CallLog> logs, _CallFilter filter) {
+    final map = <String, List<CallLog>>{};
+    for (final log in logs) {
+      (map[log.displayNumber] ??= []).add(log);
+    }
+    final groups = map.entries
+        .map((e) => CallerGroup(e.key, e.value)) // logs already newest-first
+        .toList()
+      ..sort((a, b) => (b.latest.startedAt ?? DateTime(0))
+          .compareTo(a.latest.startedAt ?? DateTime(0)));
 
-class _CallHistoryList extends ConsumerWidget {
-  const _CallHistoryList();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(callHistoryProvider);
-
-    return async.when(
-      loading: () => const Center(
-        child: CircularProgressIndicator(
-          color: Color(0xFF6C63FF),
-          strokeWidth: 2,
-        ),
-      ),
-      error: (e, _) => Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline, color: Color(0xFFEF4444), size: 32),
-            const SizedBox(height: 8),
-            Text(
-              'Failed to load call history',
-              style: GoogleFonts.inter(
-                  fontSize: 13, color: const Color(0xFF6B7280)),
-            ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: () => ref.invalidate(callHistoryProvider),
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
-      ),
-      data: (logs) {
-        if (logs.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.history, size: 40, color: Color(0xFFD1D5DB)),
-                const SizedBox(height: 12),
-                Text(
-                  'No call history yet',
-                  style: GoogleFonts.inter(
-                      fontSize: 13, color: const Color(0xFF9CA3AF)),
-                ),
-              ],
-            ),
-          );
-        }
-        return RefreshIndicator(
-          color: const Color(0xFF6C63FF),
-          onRefresh: () async => ref.invalidate(callHistoryProvider),
-          child: ListView.builder(
-            itemCount: logs.length,
-            itemBuilder: (context, i) => _CallLogItem(log: logs[i]),
-          ),
-        );
-      },
-    );
+    return switch (filter) {
+      _CallFilter.all => groups,
+      _CallFilter.missed => groups.where((g) => g.hasMissed).toList(),
+      _CallFilter.voicemail => groups.where((g) => g.hasVoicemail).toList(),
+    };
   }
 }
 
-class _CallLogItem extends StatefulWidget {
-  final CallLog log;
-  const _CallLogItem({required this.log});
+// ── Caller row ───────────────────────────────────────────────────────────────
+
+class _CallerRow extends StatefulWidget {
+  final CallerGroup group;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _CallerRow(
+      {required this.group, required this.isSelected, required this.onTap});
 
   @override
-  State<_CallLogItem> createState() => _CallLogItemState();
+  State<_CallerRow> createState() => _CallerRowState();
 }
 
-class _CallLogItemState extends State<_CallLogItem> {
+class _CallerRowState extends State<_CallerRow> {
   bool _hovered = false;
 
-  static (IconData, Color, String) _stateInfo(CallLog log) {
-    final state = log.state ?? '';
-    final direction = log.direction ?? '';
-    if (state == 'missed') {
-      return (Icons.call_missed, const Color(0xFFEF4444), 'Missed');
-    }
-    if (direction == 'incoming') {
-      return (Icons.call_received, const Color(0xFF22C55E), 'Inbound');
-    }
-    return (Icons.call_made, const Color(0xFF6C63FF), 'Outbound');
+  static Color _latestColor(CallLog log) {
+    if (log.state == 'missed') { return const Color(0xFFEF4444); }
+    if (log.state == 'voicemail') { return const Color(0xFF7C75F0); }
+    if (log.direction == 'incoming' || log.direction == 'inbound') { return const Color(0xFF22C55E); }
+    return const Color(0xFF5B52E8);
   }
 
-  static Color _avatarColor(CallLog log) {
-    final state = log.state ?? '';
-    if (state == 'missed') return const Color(0xFFEF4444);
-    if (log.direction == 'incoming') return const Color(0xFF22C55E);
-    return const Color(0xFF6C63FF);
+  static IconData _latestIcon(CallLog log) {
+    if (log.state == 'missed') { return Icons.call_missed; }
+    if (log.state == 'voicemail') { return Icons.voicemail; }
+    if (log.direction == 'incoming' || log.direction == 'inbound') { return Icons.call_received; }
+    return Icons.call_made;
+  }
+
+  static String _latestLabel(CallLog log) {
+    if (log.state == 'missed') { return 'Missed'; }
+    if (log.state == 'voicemail') { return 'Voicemail'; }
+    if (log.direction == 'incoming' || log.direction == 'inbound') { return 'Inbound'; }
+    return 'Outbound';
   }
 
   static String _initials(String number) {
     final digits = number.replaceAll(RegExp(r'\D'), '');
     if (digits.length >= 2) return digits.substring(digits.length - 2);
-    return number.isNotEmpty ? number[0] : '?';
+    return number.isNotEmpty ? number[0].toUpperCase() : '?';
   }
 
-  static String _formatTimestamp(DateTime? ts) {
+  static String _relativeTime(DateTime? ts) {
     if (ts == null) return '';
     final diff = DateTime.now().difference(ts);
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    if (diff.inMinutes < 1) return 'Just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
+    if (diff.inHours < 24) return '${diff.inHours}h';
     if (diff.inDays == 1) return 'Yesterday';
-    return '${diff.inDays}d ago';
+    return '${diff.inDays}d';
   }
 
-  static String _formatDuration(int? seconds) {
-    if (seconds == null || seconds <= 0) return '';
-    final m = seconds ~/ 60;
-    final s = (seconds % 60).toString().padLeft(2, '0');
-    return '$m:$s';
+  static String _duration(int? s) {
+    if (s == null || s <= 0) return '';
+    final m = s ~/ 60;
+    final sec = (s % 60).toString().padLeft(2, '0');
+    return '$m:$sec';
   }
 
   @override
   Widget build(BuildContext context) {
-    final log = widget.log;
-    final (typeIcon, typeColor, typeLabel) = _stateInfo(log);
-    final color = _avatarColor(log);
-    final number = log.displayNumber;
-    final initials = _initials(number);
-
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        color: _hovered ? const Color(0xFFF5F3FF) : Colors.transparent,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            // Avatar
-            CircleAvatar(
-              radius: 20,
-              backgroundColor: color.withValues(alpha: 0.15),
-              child: Text(
-                initials,
-                style: GoogleFonts.inter(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: color,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            // Details
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    number,
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFF111827),
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Row(
-                    children: [
-                      Icon(typeIcon, size: 12, color: typeColor),
-                      const SizedBox(width: 3),
-                      Text(
-                        typeLabel,
-                        style: GoogleFonts.inter(
-                          fontSize: 10,
-                          color: typeColor,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      if (log.hangupCause != null &&
-                          log.state == 'missed') ...[
-                        const SizedBox(width: 4),
-                        Text(
-                          '· ${log.hangupCause}',
-                          style: GoogleFonts.inter(
-                            fontSize: 10,
-                            color: const Color(0xFF9CA3AF),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 6),
-            // Timestamp + duration
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  _formatTimestamp(log.startedAt),
-                  style: GoogleFonts.inter(
-                    fontSize: 10,
-                    color: const Color(0xFF9CA3AF),
-                  ),
-                ),
-                if (_formatDuration(log.durationSeconds).isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    _formatDuration(log.durationSeconds),
-                    style: GoogleFonts.inter(
-                      fontSize: 10,
-                      color: const Color(0xFFD1D5DB),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ── Existing static-list widgets (Favourites / Active / Missed tabs) ──────────
-
-class _CallItem extends StatefulWidget {
-  final CallRecord call;
-  final bool isSelected;
-  final VoidCallback onTap;
-  final VoidCallback onCall;
-
-  const _CallItem({
-    required this.call,
-    required this.isSelected,
-    required this.onTap,
-    required this.onCall,
-  });
-
-  @override
-  State<_CallItem> createState() => _CallItemState();
-}
-
-class _CallItemState extends State<_CallItem> {
-  bool _hovered = false;
-
-  static (IconData, Color, String) _typeInfo(CallType type) {
-    return switch (type) {
-      CallType.outbound =>
-        (Icons.call_made, const Color(0xFF6C63FF), 'Outbound call'),
-      CallType.inbound =>
-        (Icons.call_received, const Color(0xFF22C55E), 'Inbound call'),
-      CallType.missed =>
-        (Icons.call_missed, const Color(0xFFEF4444), 'Missed call'),
-      CallType.conference =>
-        (Icons.people_outline, const Color(0xFFF59E0B), 'Conference call'),
-    };
-  }
-
-  static String _formatTimestamp(DateTime ts) {
-    final diff = DateTime.now().difference(ts);
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    if (diff.inDays == 1) return 'Yesterday';
-    return '${diff.inDays}d ago';
-  }
-
-  static String _formatDuration(Duration? d) {
-    if (d == null) return '';
-    final m = d.inMinutes;
-    final s = (d.inSeconds % 60).toString().padLeft(2, '0');
-    return '$m:$s';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final call = widget.call;
-    final (typeIcon, typeColor, typeLabel) = _typeInfo(call.type);
-    final showActions = _hovered || widget.isSelected;
+    final group = widget.group;
+    final log = group.latest;
+    final color = _latestColor(log);
+    final number = group.number;
+    final dur = _duration(log.durationSeconds);
+    final time = _relativeTime(log.startedAt);
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -504,117 +311,148 @@ class _CallItemState extends State<_CallItem> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          color: widget.isSelected
-              ? const Color(0xFFEDE9FE)
-              : _hovered
-                  ? const Color(0xFFF5F3FF)
-                  : Colors.transparent,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          duration: const Duration(milliseconds: 100),
+          decoration: BoxDecoration(
+            color: widget.isSelected
+                ? const Color(0xFF5B52E8).withValues(alpha: 0.08)
+                : _hovered
+                    ? Colors.white.withValues(alpha: 0.02)
+                    : Colors.transparent,
+            border: Border(
+              left: BorderSide(
+                color: widget.isSelected
+                    ? const Color(0xFF5B52E8)
+                    : Colors.transparent,
+                width: 2,
+              ),
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              CircleAvatar(
-                radius: 20,
-                backgroundColor: call.avatarColor.withValues(alpha: 0.15),
-                child: Text(
-                  call.initials,
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: call.avatarColor,
+              // Avatar
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: color.withValues(alpha: 0.2)),
+                ),
+                child: Center(
+                  child: Text(
+                    _initials(number),
+                    style: GoogleFonts.dmMono(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                    ),
                   ),
                 ),
               ),
               const SizedBox(width: 10),
+              // Info
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        Flexible(
+                        Expanded(
                           child: Text(
-                            call.count > 1
-                                ? '${call.name} (${call.count})'
-                                : call.name,
-                            style: GoogleFonts.inter(
+                            number,
+                            style: GoogleFonts.dmSans(
                               fontSize: 13,
                               fontWeight: FontWeight.w600,
-                              color: const Color(0xFF111827),
+                              color: log.state == 'missed'
+                                  ? const Color(0xFFEF4444)
+                                  : Colors.white.withValues(alpha: 0.9),
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
+                        // Call count badge
+                        if (group.totalCount > 1) ...[
+                          const SizedBox(width: 4),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2A2A3E),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              '${group.totalCount}',
+                              style: GoogleFonts.dmMono(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white.withValues(alpha: 0.4),
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      call.number,
-                      style: GoogleFonts.inter(
-                        fontSize: 11,
-                        color: const Color(0xFF6B7280),
-                      ),
-                    ),
-                    const SizedBox(height: 3),
                     Row(
                       children: [
-                        Icon(typeIcon, size: 12, color: typeColor),
+                        Icon(_latestIcon(log),
+                            size: 11,
+                            color: color.withValues(alpha: 0.7)),
                         const SizedBox(width: 3),
                         Text(
-                          typeLabel,
-                          style: GoogleFonts.inter(
+                          _latestLabel(log),
+                          style: GoogleFonts.dmSans(
                             fontSize: 10,
-                            color: typeColor,
-                            fontWeight: FontWeight.w500,
+                            color: color.withValues(alpha: 0.7),
                           ),
                         ),
+                        if (dur.isNotEmpty) ...[
+                          Text(
+                            ' · $dur',
+                            style: GoogleFonts.dmMono(
+                              fontSize: 10,
+                              color: Colors.white.withValues(alpha: 0.2),
+                            ),
+                          ),
+                        ],
+                        // Indicators for other call types in the group
+                        if (group.hasMissed && log.state != 'missed') ...[
+                          const SizedBox(width: 4),
+                          Container(
+                            width: 5,
+                            height: 5,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFEF4444),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ],
+                        if (group.hasVoicemail && log.state != 'voicemail') ...[
+                          const SizedBox(width: 3),
+                          Container(
+                            width: 5,
+                            height: 5,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF7C75F0),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: 6),
-              if (showActions)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _IconAction(
-                      icon: Icons.videocam_outlined,
-                      color: const Color(0xFF6C63FF),
-                      onTap: () {},
-                    ),
-                    const SizedBox(width: 6),
-                    _IconAction(
-                      icon: Icons.call,
-                      color: const Color(0xFF22C55E),
-                      onTap: widget.onCall,
-                    ),
-                  ],
-                )
-              else
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      _formatTimestamp(call.timestamp),
-                      style: GoogleFonts.inter(
-                        fontSize: 10,
-                        color: const Color(0xFF9CA3AF),
-                      ),
-                    ),
-                    if (call.duration != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        _formatDuration(call.duration),
-                        style: GoogleFonts.inter(
-                          fontSize: 10,
-                          color: const Color(0xFFD1D5DB),
-                        ),
-                      ),
-                    ],
-                  ],
+              // Time
+              Text(
+                time,
+                style: GoogleFonts.dmSans(
+                  fontSize: 11,
+                  color: Colors.white.withValues(alpha: 0.25),
                 ),
+              ),
             ],
           ),
         ),
@@ -623,26 +461,86 @@ class _CallItemState extends State<_CallItem> {
   }
 }
 
-class _IconAction extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final VoidCallback onTap;
+// ── Filter pill ──────────────────────────────────────────────────────────────
 
-  const _IconAction(
-      {required this.icon, required this.color, required this.onTap});
+class _FilterPill extends StatelessWidget {
+  final String label;
+  final bool isActive;
+  final VoidCallback onTap;
+  final Color accentColor;
+
+  const _FilterPill({
+    required this.label,
+    required this.isActive,
+    required this.onTap,
+    this.accentColor = const Color(0xFF5B52E8),
+  });
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
+    return GestureDetector(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        padding: const EdgeInsets.all(6),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
         decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(6),
+          color: isActive
+              ? accentColor.withValues(alpha: 0.15)
+              : const Color(0xFF13131F),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isActive
+                ? accentColor.withValues(alpha: 0.4)
+                : const Color(0xFF2A2A3E),
+          ),
         ),
-        child: Icon(icon, size: 16, color: color),
+        child: Text(
+          label,
+          style: GoogleFonts.dmSans(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: isActive ? accentColor : Colors.white.withValues(alpha: 0.35),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Top bar icon ─────────────────────────────────────────────────────────────
+
+class _TopBarIcon extends StatefulWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _TopBarIcon({required this.icon, required this.onTap});
+
+  @override
+  State<_TopBarIcon> createState() => _TopBarIconState();
+}
+
+class _TopBarIconState extends State<_TopBarIcon> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 100),
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            color: _hovered ? const Color(0xFF1E1E2E) : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Icon(widget.icon,
+              size: 16,
+              color: Colors.white.withValues(alpha: _hovered ? 0.5 : 0.25)),
+        ),
       ),
     );
   }

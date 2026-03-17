@@ -87,25 +87,27 @@ Deno.serve(async (req) => {
 
   switch (eventType) {
     case "call.initiated": {
-      await supabase.from("call_logs").upsert({
-        call_control_id: callData.call_control_id,
-        call_leg_id: callData.call_leg_id,
-        call_session_id: callData.call_session_id,
-        direction: callData.direction,
-        from_number: callData.from,
-        to_number: callData.to,
-        state: "initiated",
-        started_at: new Date().toISOString(),
-      }, { onConflict: "call_control_id" })
-
-      // Dial the SIP user only for fresh inbound calls on the DID.
-      // Two guards against the dial loop:
-      //   1. cs?.stage — b-leg we created via API carries client_state (some events)
-      //   2. isToSipUser — the SIP credentials connection fires call.initiated with
-      //      direction "incoming" and no client_state when it receives our b-leg dial,
-      //      which would re-trigger the loop. Skip anything destined for the SIP user.
       const sipUser = Deno.env.get("TELNYX_SIP_USER") ?? ""
       const isToSipUser = callData.to?.includes(sipUser) ?? false
+
+      // Skip SIP b-leg records — they are internal routing legs and should
+      // not appear in the call history.
+      if (!isToSipUser) {
+        await supabase.from("call_logs").upsert({
+          call_control_id: callData.call_control_id,
+          call_leg_id: callData.call_leg_id,
+          call_session_id: callData.call_session_id,
+          direction: callData.direction,
+          from_number: callData.from,
+          to_number: callData.to,
+          state: "initiated",
+          started_at: new Date().toISOString(),
+        }, { onConflict: "call_control_id" })
+      }
+
+      // Dial the SIP user only for fresh inbound calls on the DID.
+      // Guard against the dial loop: isToSipUser catches the SIP credentials
+      // connection re-firing call.initiated when it receives our b-leg dial.
       if (callData.direction === "incoming" && !cs?.stage && !isToSipUser) {
         const res = await fetch("https://api.telnyx.com/v2/calls", {
           method: "POST",
@@ -181,60 +183,69 @@ Deno.serve(async (req) => {
 
       console.log(`Hangup: stage=${cs?.stage}, cause=${hangupCause}, id=${callData.call_control_id}`)
 
-      // B-leg ended without the app answering — trigger voicemail if the a-leg is still alive.
-      // Covers both timeout (app didn't answer) and normal_clearing (user declined).
-      // originator_cancel means the caller hung up — a-leg is already gone, skip voicemail.
-      if (cs?.stage === "dial" && hangupCause !== "originator_cancel" && cs?.inbound_call_control_id) {
-        const { data: aLeg } = await supabase
-          .from("call_logs")
-          .select("state")
-          .eq("call_control_id", cs.inbound_call_control_id as string)
-          .maybeSingle()
+      // ── B-leg (SIP forwarding leg) ────────────────────────────────────────
+      // All b-leg hangups carry cs.stage === "dial". Trigger voicemail if
+      // eligible, then break — b-leg records are never written to call_logs.
+      if (cs?.stage === "dial") {
+        if (hangupCause !== "originator_cancel" && cs?.inbound_call_control_id) {
+          const { data: aLeg } = await supabase
+            .from("call_logs")
+            .select("state")
+            .eq("call_control_id", cs.inbound_call_control_id as string)
+            .maybeSingle()
 
-        if (aLeg?.state === "initiated") {
-          console.log(`SIP b-leg ended (${hangupCause}) — answering inbound call for voicemail`)
-          await callControlAction(cs.inbound_call_control_id as string, "answer", {
-            client_state: btoa(JSON.stringify({
-              stage: "voicemail",
-              original_from: cs.original_from,
-              original_to: cs.original_to,
-            })),
-          })
-          break
-        } else {
-          console.log(`SIP b-leg ended (${hangupCause}) but a-leg state=${aLeg?.state} — skipping voicemail`)
+          if (aLeg?.state === "initiated") {
+            console.log(`SIP b-leg ended (${hangupCause}) — answering inbound call for voicemail`)
+            await callControlAction(cs.inbound_call_control_id as string, "answer", {
+              client_state: btoa(JSON.stringify({
+                stage: "voicemail",
+                original_from: cs.original_from,
+                original_to: cs.original_to,
+              })),
+            })
+          } else {
+            console.log(`SIP b-leg ended (${hangupCause}) but a-leg state=${aLeg?.state} — skipping voicemail`)
+          }
         }
+        break // Never log b-leg records regardless of hangup cause
       }
 
-      // direction is often missing from hangup payload — fall back to DB
+      // ── A-leg / outbound calls ────────────────────────────────────────────
+      // Look up the existing record — direction is often missing from the
+      // hangup payload. If no record exists this is an unknown internal event;
+      // skip it rather than ghost-creating a new row.
       const { data: callLog } = await supabase
         .from("call_logs")
-        .select("direction, answered_by")
+        .select("direction, answered_by, state")
         .eq("call_control_id", callData.call_control_id)
-        .single()
+        .maybeSingle()
 
-      const direction = callLog?.direction ?? callData.direction
+      if (!callLog) {
+        console.log(`Hangup: no record found for ${callData.call_control_id} — skipping`)
+        break
+      }
+
+      const direction = callLog.direction ?? callData.direction
       const durationSeconds = callData.start_time
         ? Math.floor((Date.now() - new Date(callData.start_time).getTime()) / 1000)
         : null
 
-      console.log(`Hangup DB update: direction=${direction}, cause=${hangupCause}, answered_by=${callLog?.answered_by}`)
+      // Preserve "voicemail" state already written by call.recording.saved.
+      const finalState = callLog.state === "voicemail" || cs?.stage === "voicemail"
+        ? "voicemail"
+        : isCompleted ? "completed" : "missed"
 
-      await supabase.from("call_logs").upsert(
-        {
-          call_control_id: callData.call_control_id,
-          call_leg_id: callData.call_leg_id,
-          call_session_id: callData.call_session_id,
-          direction: direction,
-          from_number: callData.from,
-          to_number: callData.to,
-          state: isCompleted ? "completed" : "missed",
+      console.log(`Hangup DB update: direction=${direction}, cause=${hangupCause}, finalState=${finalState}`)
+
+      await supabase
+        .from("call_logs")
+        .update({
+          state: finalState,
           ended_at: new Date().toISOString(),
           hangup_cause: hangupCause,
           duration_seconds: durationSeconds,
-        },
-        { onConflict: "call_control_id" },
-      )
+        })
+        .eq("call_control_id", callData.call_control_id)
       break
     }
 
@@ -256,7 +267,10 @@ Deno.serve(async (req) => {
           console.log("Downloading voicemail recording:", recordingUrl)
           const audioRes = await fetch(recordingUrl)
           const audioBlob = await audioRes.blob()
-          const fileName = `${callData.call_control_id}-${Date.now()}.mp3`
+          // Sanitize call_control_id for use as a filename — colons and other
+          // special characters cause path-encoding mismatches in Supabase Storage.
+          const safeId = (callData.call_control_id ?? "unknown").replace(/[^a-zA-Z0-9\-_]/g, "_")
+          const fileName = `${safeId}-${Date.now()}.mp3`
           const storagePath = `recordings/${fileName}`
 
           const { error: storageError } = await supabase.storage
@@ -286,7 +300,12 @@ Deno.serve(async (req) => {
 
       await supabase
         .from("call_logs")
-        .update({ recording_url: recordingUrl })
+        .update({
+          recording_url: recordingUrl,
+          // Lock in "voicemail" state now so call.hangup can't overwrite it
+          // with "missed" if the client_state is somehow unavailable later.
+          ...(cs?.stage === "voicemail" ? { state: "voicemail" } : {}),
+        })
         .eq("call_control_id", callData.call_control_id)
       break
     }
