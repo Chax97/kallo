@@ -29,35 +29,15 @@ class _AddContactDialogState extends State<_AddContactDialog> {
   late final TextEditingController _company = TextEditingController();
   late final TextEditingController _phone = TextEditingController();
   late final TextEditingController _mobile = TextEditingController();
+  late final TextEditingController _notes = TextEditingController();
 
   bool _saving = false;
-  List<String> _phoneBooks = [];
-  String? _selectedPhoneBook;
-  bool _loadingPhoneBooks = true;
 
   @override
   void initState() {
     super.initState();
     if (widget.prefillPhone != null) {
       _phone.text = widget.prefillPhone!;
-    }
-    _fetchPhoneBooks();
-  }
-
-  Future<void> _fetchPhoneBooks() async {
-    try {
-      final rows = await Supabase.instance.client
-          .from('phone_books')
-          .select('name')
-          .order('name', ascending: true);
-      if (mounted) {
-        setState(() {
-          _phoneBooks = rows.map<String>((r) => r['name'] as String).toList();
-          _loadingPhoneBooks = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) setState(() => _loadingPhoneBooks = false);
     }
   }
 
@@ -67,6 +47,7 @@ class _AddContactDialogState extends State<_AddContactDialog> {
     _company.dispose();
     _phone.dispose();
     _mobile.dispose();
+    _notes.dispose();
     super.dispose();
   }
 
@@ -74,7 +55,7 @@ class _AddContactDialogState extends State<_AddContactDialog> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
     try {
-      await Supabase.instance.client.from('contacts').insert({
+      await Supabase.instance.client.from('phonebook_contacts').insert({
         'name': _name.text.trim(),
         if (_company.text.trim().isNotEmpty)
           'company_name': _company.text.trim(),
@@ -82,7 +63,7 @@ class _AddContactDialogState extends State<_AddContactDialog> {
           'phone_number': _phone.text.trim(),
         if (_mobile.text.trim().isNotEmpty)
           'mobile_number': _mobile.text.trim(),
-        if (_selectedPhoneBook != null) 'phone_book': _selectedPhoneBook,
+        if (_notes.text.trim().isNotEmpty) 'notes': _notes.text.trim(),
       });
       if (mounted) {
         widget.onSaved?.call();
@@ -181,14 +162,10 @@ class _AddContactDialogState extends State<_AddContactDialog> {
                   keyboardType: TextInputType.phone,
                 ),
                 const SizedBox(height: 12),
-                // Phone Book dropdown
-                _FieldLabel('Phone Book'),
-                const SizedBox(height: 5),
-                _PhoneBookDropdown(
-                  phoneBooks: _phoneBooks,
-                  selected: _selectedPhoneBook,
-                  loading: _loadingPhoneBooks,
-                  onChanged: (v) => setState(() => _selectedPhoneBook = v),
+                _Field(
+                  label: 'Notes',
+                  controller: _notes,
+                  hint: 'Any additional info…',
                 ),
                 const SizedBox(height: 24),
                 Row(
@@ -212,81 +189,6 @@ class _AddContactDialogState extends State<_AddContactDialog> {
           ),
         ),
       ),
-    );
-  }
-}
-
-// ── Phone book dropdown ────────────────────────────────────────────────────────
-
-class _PhoneBookDropdown extends StatelessWidget {
-  final List<String> phoneBooks;
-  final String? selected;
-  final bool loading;
-  final ValueChanged<String?> onChanged;
-
-  const _PhoneBookDropdown({
-    required this.phoneBooks,
-    required this.selected,
-    required this.loading,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF0D0D14),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF2A2A3E)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: loading
-          ? const SizedBox(
-              height: 38,
-              child: Center(
-                child: SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 1.5, color: Color(0xFF5B52E8)),
-                ),
-              ),
-            )
-          : DropdownButtonHideUnderline(
-              child: DropdownButton<String>(
-                value: selected,
-                hint: Text(
-                  'Select phone book…',
-                  style: GoogleFonts.dmSans(
-                      fontSize: 13,
-                      color: Colors.white.withValues(alpha: 0.2)),
-                ),
-                isExpanded: true,
-                dropdownColor: const Color(0xFF13131F),
-                icon: Icon(Icons.keyboard_arrow_down,
-                    size: 16,
-                    color: Colors.white.withValues(alpha: 0.3)),
-                style: GoogleFonts.dmSans(
-                    fontSize: 13,
-                    color: Colors.white.withValues(alpha: 0.85)),
-                items: [
-                  DropdownMenuItem<String>(
-                    value: null,
-                    child: Text(
-                      'None',
-                      style: GoogleFonts.dmSans(
-                          fontSize: 13,
-                          color: Colors.white.withValues(alpha: 0.35)),
-                    ),
-                  ),
-                  ...phoneBooks.map((b) => DropdownMenuItem<String>(
-                        value: b,
-                        child: Text(b),
-                      )),
-                ],
-                onChanged: onChanged,
-              ),
-            ),
     );
   }
 }

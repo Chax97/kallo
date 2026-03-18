@@ -137,7 +137,7 @@ class _ContactsPanelState extends ConsumerState<ContactsPanel> {
                             c.name.toLowerCase().contains(_query) ||
                             (c.companyName?.toLowerCase().contains(_query) ??
                                 false) ||
-                            (c.phoneBook?.toLowerCase().contains(_query) ??
+                            (c.notes?.toLowerCase().contains(_query) ??
                                 false) ||
                             (c.phoneNumber?.contains(_query) ?? false) ||
                             (c.mobileNumber?.contains(_query) ?? false))
@@ -283,26 +283,15 @@ class _ContactRowState extends ConsumerState<_ContactRow> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ],
-                  if (c.phoneBook != null) ...[
+                  if (c.notes != null) ...[
                     const SizedBox(height: 2),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 5, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF5B52E8).withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(
-                            color:
-                                const Color(0xFF5B52E8).withValues(alpha: 0.25)),
-                      ),
-                      child: Text(
-                        c.phoneBook!,
-                        style: GoogleFonts.dmSans(
-                            fontSize: 9,
-                            color: const Color(0xFF5B52E8)
-                                .withValues(alpha: 0.8)),
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                    Text(
+                      c.notes!,
+                      style: GoogleFonts.dmSans(
+                          fontSize: 9,
+                          color: Colors.white.withValues(alpha: 0.3)),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
                     ),
                   ],
                 ],

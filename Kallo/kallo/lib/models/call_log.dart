@@ -1,10 +1,10 @@
 class CallLog {
   final String id;
-  final String? callControlId;
+  final String? callControlId; // DB column: telnyx_call_id
   final String? direction;
   final String? fromNumber;
   final String? toNumber;
-  final String? state;
+  final String? state; // reads from status (or legacy state)
   final DateTime? startedAt;
   final DateTime? answeredAt;
   final DateTime? endedAt;
@@ -31,11 +31,14 @@ class CallLog {
 
   factory CallLog.fromJson(Map<String, dynamic> json) => CallLog(
         id: json['id'] as String,
-        callControlId: json['call_control_id'] as String?,
+        // telnyx_call_id is the new column name; fall back to old call_control_id
+        callControlId:
+            (json['telnyx_call_id'] ?? json['call_control_id']) as String?,
         direction: json['direction'] as String?,
         fromNumber: json['from_number'] as String?,
         toNumber: json['to_number'] as String?,
-        state: json['state'] as String?,
+        // status is the new column name; fall back to old state
+        state: (json['status'] ?? json['state']) as String?,
         startedAt: json['started_at'] != null
             ? DateTime.parse(json['started_at'] as String)
             : null,

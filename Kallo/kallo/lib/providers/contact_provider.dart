@@ -11,7 +11,7 @@ final contactsProvider = StreamProvider.autoDispose<List<Contact>>((ref) {
 
   Future<void> fetch() async {
     final rows = await supabase
-        .from('contacts')
+        .from('phonebook_contacts')
         .select()
         .order('name', ascending: true);
     controller.add(rows.map((e) => Contact.fromJson(e)).toList());
@@ -20,11 +20,11 @@ final contactsProvider = StreamProvider.autoDispose<List<Contact>>((ref) {
   fetch();
 
   final channel = supabase
-      .channel('contacts_realtime')
+      .channel('phonebook_contacts_realtime')
       .onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',
-        table: 'contacts',
+        table: 'phonebook_contacts',
         callback: (_) => fetch(),
       )
       .subscribe();

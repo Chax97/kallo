@@ -4,7 +4,7 @@ class Contact {
   final String? phoneNumber;
   final String? mobileNumber;
   final String? companyName;
-  final String? phoneBook;
+  final String? notes;
   final String? email;
   final DateTime? createdAt;
 
@@ -14,7 +14,7 @@ class Contact {
     this.phoneNumber,
     this.mobileNumber,
     this.companyName,
-    this.phoneBook,
+    this.notes,
     this.email,
     this.createdAt,
   });
@@ -25,7 +25,7 @@ class Contact {
         phoneNumber: json['phone_number'] as String?,
         mobileNumber: json['mobile_number'] as String?,
         companyName: json['company_name'] as String?,
-        phoneBook: json['phone_book'] as String?,
+        notes: json['notes'] as String?,
         email: json['email'] as String?,
         createdAt: json['created_at'] != null
             ? DateTime.parse(json['created_at'] as String)

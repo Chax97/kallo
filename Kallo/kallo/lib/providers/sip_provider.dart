@@ -124,9 +124,9 @@ class VertoNotifier extends Notifier<VertoState> {
     final callControlId = _webrtc.inboundCallControlId;
     if (callControlId != null) {
       final err = await Supabase.instance.client
-          .from('call_logs')
+          .from('calls')
           .update({'answered_by': 'app'})
-          .eq('call_control_id', callControlId)
+          .eq('telnyx_call_id', callControlId)
           .then((_) => null, onError: (e) => e);
       if (err != null) debugPrint('acceptCall: DB update error: $err');
     }

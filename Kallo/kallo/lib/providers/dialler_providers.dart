@@ -76,7 +76,7 @@ class _SelectedCallIndexNotifier extends Notifier<int?> {
 final selectedCallIndexProvider =
     NotifierProvider<_SelectedCallIndexNotifier, int?>(_SelectedCallIndexNotifier.new);
 
-// ── Call history (live from Supabase call_logs) ───────────────────────────────
+// ── Call history (live from Supabase calls) ───────────────────────────────────
 final callHistoryProvider = StreamProvider.autoDispose<List<CallLog>>((ref) {
   final supabase = Supabase.instance.client;
 
@@ -85,7 +85,7 @@ final callHistoryProvider = StreamProvider.autoDispose<List<CallLog>>((ref) {
 
   Future<void> fetchLogs() async {
     final response = await supabase
-        .from('call_logs')
+        .from('calls')
         .select()
         // Exclude internal SIP forwarding legs — their to_number is a sip: URI.
         .not('to_number', 'ilike', 'sip:%')
@@ -97,15 +97,15 @@ final callHistoryProvider = StreamProvider.autoDispose<List<CallLog>>((ref) {
     controller.add(logs);
   }
 
-    fetchLogs();
+  fetchLogs();
 
   // Listen for realtime inserts/updates
   final channel = supabase
-      .channel('call_logs_changes')
+      .channel('calls_changes')
       .onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',
-        table: 'call_logs',
+        table: 'calls',
         callback: (_) => fetchLogs(),
       )
       .subscribe();
