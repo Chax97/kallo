@@ -7,9 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../../models/call_log.dart';
-import '../../providers/dialler_providers.dart';
-import '../../providers/telnyx_provider.dart';
+import '../../core/models/call_log.dart';
+import '../../core/providers/dialler_providers.dart';
+import '../../core/providers/telnyx_provider.dart';
 import 'call_list_panel.dart' show selectedCallerNumberProvider, CallerGroup;
 
 class CallDetailPanel extends ConsumerWidget {

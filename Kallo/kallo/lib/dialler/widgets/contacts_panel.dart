@@ -4,9 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../models/contact.dart';
-import '../../providers/contact_provider.dart';
-import '../../providers/telnyx_provider.dart';
+import '../../core/models/contact.dart';
+import '../../core/providers/contact_provider.dart';
+import '../../core/providers/telnyx_provider.dart';
 import 'add_contact_dialog.dart';
 
 class ContactsPanel extends ConsumerStatefulWidget {

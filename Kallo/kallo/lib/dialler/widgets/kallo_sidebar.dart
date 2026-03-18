@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../providers/dialler_providers.dart';
+import '../../core/providers/dialler_providers.dart';
 
 class KalloSidebar extends ConsumerWidget {
   const KalloSidebar({super.key});

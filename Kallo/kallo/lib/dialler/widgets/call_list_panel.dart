@@ -2,10 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../../models/call_log.dart';
-import '../../models/contact.dart';
-import '../../providers/contact_provider.dart';
-import '../../providers/dialler_providers.dart';
+import '../../core/models/call_log.dart';
+import '../../core/models/contact.dart';
+import '../../core/providers/contact_provider.dart';
+import '../../core/providers/dialler_providers.dart';
 import 'add_contact_dialog.dart';
 
 enum _CallFilter { all, missed, voicemail }

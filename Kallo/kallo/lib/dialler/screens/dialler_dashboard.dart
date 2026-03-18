@@ -2,15 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import '../providers/sip_provider.dart' show vertoProvider;
-import '../providers/telnyx_provider.dart';
-import '../widgets/dialler/active_call_overlay.dart';
-import '../widgets/dialler/call_detail_panel.dart';
-import '../widgets/dialler/call_list_panel.dart';
-import '../widgets/dialler/floating_dialer.dart';
-import '../widgets/dialler/kallo_sidebar.dart';
-import '../widgets/dialler/contacts_panel.dart';
-import '../widgets/dialler/kallo_top_bar.dart';
+import '../../core/providers/sip_provider.dart' show vertoProvider;
+import '../../core/providers/telnyx_provider.dart';
+import '../widgets/active_call_overlay.dart';
+import '../widgets/call_detail_panel.dart';
+import '../widgets/call_list_panel.dart';
+import '../widgets/floating_dialer.dart';
+import '../widgets/kallo_sidebar.dart';
+import '../widgets/contacts_panel.dart';
+import '../widgets/kallo_top_bar.dart';
 
 class DiallerDashboard extends ConsumerWidget {
   const DiallerDashboard({super.key});

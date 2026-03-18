@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../../providers/dialler_providers.dart';
-import '../../providers/telnyx_provider.dart';
+import '../../core/providers/dialler_providers.dart';
+import '../../core/providers/telnyx_provider.dart';
 
 class KeypadPanel extends ConsumerWidget {
   const KeypadPanel({super.key});

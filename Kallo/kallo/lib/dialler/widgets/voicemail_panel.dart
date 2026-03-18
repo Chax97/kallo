@@ -8,8 +8,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:record/record.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../models/voicemail.dart';
-import '../../providers/voicemail_provider.dart';
+import '../../core/models/voicemail.dart';
+import '../../core/providers/voicemail_provider.dart';
 
 class VoicemailPanel extends ConsumerWidget {
   const VoicemailPanel({super.key});

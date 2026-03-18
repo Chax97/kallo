@@ -4,10 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import 'providers/sip_provider.dart';
+import 'core/providers/sip_provider.dart';
 
 
-import 'screens/dialler_dashboard.dart';
+import 'dialler/screens/dialler_dashboard.dart';
 
 const _scheme = 'kallo';
 const _redirectUrl = '$_scheme://auth-callback';

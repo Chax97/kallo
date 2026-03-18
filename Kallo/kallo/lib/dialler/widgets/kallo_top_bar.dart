@@ -3,8 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../providers/dialler_providers.dart';
-import '../../providers/sip_provider.dart';
+import '../../core/providers/dialler_providers.dart';
+import '../../core/providers/sip_provider.dart';
 
 class KalloTopBar extends ConsumerWidget {
   const KalloTopBar({super.key});
