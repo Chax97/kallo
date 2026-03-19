@@ -562,6 +562,7 @@ class _InviteUserDialogState extends ConsumerState<_InviteUserDialog> {
                     items: const [
                       DropdownMenuItem(value: 'agent', child: Text('Agent')),
                       DropdownMenuItem(value: 'admin', child: Text('Admin')),
+                      DropdownMenuItem(value: 'super_admin', child: Text('Super Admin')),
                     ],
                     onChanged: (v) => setState(() => _role = v ?? 'agent'),
                   ),
@@ -892,6 +893,7 @@ class _GeneralTab extends StatelessWidget {
                     items: const [
                       DropdownMenuItem(value: 'agent', child: Text('Agent')),
                       DropdownMenuItem(value: 'admin', child: Text('Admin')),
+                      DropdownMenuItem(value: 'super_admin', child: Text('Super Admin')),
                     ],
                     onChanged: (v) => onRoleChanged(v ?? 'agent'),
                   ),

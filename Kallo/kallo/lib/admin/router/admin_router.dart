@@ -8,6 +8,7 @@ import '../screens/phone_numbers/phone_numbers_screen.dart';
 import '../screens/call_flows/call_flows_screen.dart';
 import '../screens/hunt_groups/hunt_groups_screen.dart';
 import '../screens/call_logs/call_logs_screen.dart';
+import '../screens/ai_agents/ai_agents_screen.dart';
 import '../screens/integrations/integrations_screen.dart';
 import '../screens/templates/templates_screen.dart';
 import '../auth/admin_login_screen.dart';
@@ -66,6 +67,12 @@ final adminRouterProvider = Provider<GoRouter>((ref) {
             path: '/call-logs',
             pageBuilder: (context, state) => const NoTransitionPage(
               child: CallLogsScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/ai-agents',
+            pageBuilder: (context, state) => const NoTransitionPage(
+              child: AiAgentsScreen(),
             ),
           ),
           GoRoute(

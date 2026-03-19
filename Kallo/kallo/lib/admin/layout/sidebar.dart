@@ -72,6 +72,12 @@ class AdminSidebar extends StatelessWidget {
                   const SizedBox(height: 16),
                   _SidebarSection(label: 'Configure'),
                   _SidebarItem(
+                    icon: Icons.smart_toy_outlined,
+                    label: 'AI Agents',
+                    route: '/ai-agents',
+                    isActive: location == '/ai-agents',
+                  ),
+                  _SidebarItem(
                     icon: Icons.extension_outlined,
                     label: 'Integrations',
                     route: '/integrations',

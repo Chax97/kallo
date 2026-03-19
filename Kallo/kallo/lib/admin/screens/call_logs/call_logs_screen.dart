@@ -1,3 +1,5 @@
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -59,17 +61,6 @@ class _CallLogFilter {
       callsFrom, callsTo, includeTransfers, includeQueueBranches);
 }
 
-final _statusValuesProvider = FutureProvider<List<String>>((ref) async {
-  final response = await Supabase.instance.client
-      .from('calls')
-      .select('status')
-      .not('status', 'is', null);
-  return (response as List)
-      .map((e) => e['status'].toString())
-      .toSet()
-      .toList()
-    ..sort();
-});
 
 final _directionValuesProvider = FutureProvider<List<String>>((ref) async {
   final response = await Supabase.instance.client
@@ -145,19 +136,10 @@ final _callLogsProvider =
   if (filter.callsFrom != null) filterQuery = filterQuery.eq('from_number', filter.callsFrom!);
   if (filter.callsTo   != null) filterQuery = filterQuery.eq('to_number',   filter.callsTo!);
 
-  if (filter.callAnswered != 'any') {
-    final allStatuses = await ref.watch(_statusValuesProvider.future);
-    final isAnswered = filter.callAnswered == 'answered';
-    final matched = allStatuses.where((s) {
-      final lower = s.toLowerCase();
-      final answeredValue = lower.contains('answer') || lower.contains('complet');
-      return isAnswered ? answeredValue : !answeredValue;
-    }).toList();
-    if (matched.isNotEmpty) {
-      filterQuery = matched.length == 1
-          ? filterQuery.eq('status', matched.first)
-          : filterQuery.inFilter('status', matched);
-    }
+  if (filter.callAnswered == 'Answered Only') {
+    filterQuery = filterQuery.eq('status', 'completed');
+  } else if (filter.callAnswered == 'Unanswered Only') {
+    filterQuery = filterQuery.inFilter('status', ['missed', 'initiated']);
   }
 
   final response = await filterQuery
@@ -187,7 +169,7 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
   bool _inbound = true;
   bool _outbound = true;
   bool _internal = true;
-  String _callAnswered = 'any';
+  String _callAnswered = 'Answered / Unanswered';
   String _callRecording = 'Any Recording Status';
   String? _callsFrom;
   String? _callsTo;
@@ -215,6 +197,34 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
 
   void _search() => setState(() => _hasSearched = true);
 
+  void _downloadCsv() {
+    final logs = ref.read(_callLogsProvider(_currentFilter)).asData?.value;
+    if (logs == null || logs.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No call data to export.')),
+      );
+      return;
+    }
+
+    final rows = <String>[
+      'Direction,From,To,Status,Date/Time,Duration (s)',
+      ...logs.map((l) {
+        String esc(String? v) => '"${(v ?? '').replaceAll('"', '""')}"';
+        final dt = l.startedAt?.toIso8601String() ?? '';
+        return '${esc(l.direction)},${esc(l.fromNumber)},${esc(l.toNumber)},'
+            '${esc(l.state)},$dt,${l.durationSeconds ?? 0}';
+      }),
+    ];
+
+    final csv = rows.join('\n');
+    final blob = html.Blob([csv], 'text/csv');
+    final url = html.Url.createObjectUrlFromBlob(blob);
+    html.AnchorElement(href: url)
+      ..setAttribute('download', 'call_history.csv')
+      ..click();
+    html.Url.revokeObjectUrl(url);
+  }
+
   void _reset() {
     setState(() {
       _fromDate = DateTime.now().subtract(const Duration(days: 2));
@@ -224,7 +234,7 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
       _inbound = true;
       _outbound = true;
       _internal = true;
-      _callAnswered = 'any';
+      _callAnswered = 'Answered / Unanswered';
       _callRecording = 'Any Recording Status';
       _callsFrom = null;
       _callsTo = null;
@@ -239,238 +249,252 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Global Call Recording bar
+          // Global Call Recording bar (full width)
           _GlobalRecordingBar(
             mode: _recordingMode,
             onChanged: (v) => setState(() => _recordingMode = v),
           ),
           const SizedBox(height: 24),
 
-          // Search History panel
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFFE8E8F0)),
-            ),
-            child: Column(
+          // Two-column layout
+          Expanded(
+            child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Text('Search History',
-                        style: Theme.of(context).textTheme.titleLarge),
-                    const Spacer(),
-                    OutlinedButton(
-                      onPressed: _reset,
-                      child: const Text('Reset Fields'),
-                    ),
-                    const SizedBox(width: 12),
-                    ElevatedButton(
-                      onPressed: _search,
-                      child: const Text('Search Calls'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Left: date/time + from/to filters
-                    Expanded(
-                      flex: 3,
-                      child: Column(
+                // ── Left column: toolbar + calls table ──────────────────────
+                Expanded(
+                  flex: 3,
+                  child: Column(
+                    children: [
+                      // Toolbar
+                      Row(
                         children: [
-                          Row(
+                          _CheckRow(
+                            label: 'Include Call Transfers',
+                            value: _includeTransfers,
+                            onChanged: (v) => setState(() => _includeTransfers = v),
+                          ),
+                          const SizedBox(width: 20),
+                          _CheckRow(
+                            label: 'Include Queue Branches',
+                            value: _includeQueueBranches,
+                            onChanged: (v) => setState(() => _includeQueueBranches = v),
+                          ),
+                          const Spacer(),
+                          OutlinedButton.icon(
+                            onPressed: _downloadCsv,
+                            icon: const Icon(Icons.download_outlined, size: 15),
+                            label: const Text('Download Call Data'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Calls table
+                      Expanded(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: const Color(0xFFE8E8F0)),
+                          ),
+                          child: Column(
                             children: [
-                              Expanded(child: _DateField(
-                                label: 'FROM DATE',
-                                value: _fromDate,
-                                onChanged: (d) => setState(() => _fromDate = d),
-                              )),
-                              const SizedBox(width: 12),
-                              Expanded(child: _TimeDropdown(
-                                label: 'FROM TIME',
+                              Container(
+                                color: const Color(0xFFF8F8FC),
+                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                                child: Row(
+                                  children: [
+                                    const SizedBox(width: 32),
+                                    const Expanded(flex: 3, child: _ColHeader('From')),
+                                    const Expanded(flex: 3, child: _ColHeader('To')),
+                                    const Expanded(flex: 3, child: _ColHeader('Answered By')),
+                                    const Expanded(flex: 3, child: _ColHeader('Date / Time')),
+                                    const Expanded(flex: 2, child: _ColHeader('Duration')),
+                                    Row(
+                                      children: [
+                                        Switch(
+                                          value: _stereo,
+                                          onChanged: (v) => setState(() => _stereo = v),
+                                          activeThumbColor: Colors.white,
+                                          activeTrackColor: const Color(0xFF4F6AFF),
+                                        ),
+                                        const Text('STEREO',
+                                            style: TextStyle(fontFamily: 'DM Sans', fontSize: 11,
+                                                fontWeight: FontWeight.w600, color: Color(0xFF9999AA),
+                                                letterSpacing: 0.5)),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Divider(height: 1),
+                              Expanded(child: _ResultsBody(filter: _currentFilter, hasSearched: _hasSearched)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(width: 20),
+
+                // ── Right column: filters ────────────────────────────────────
+                SizedBox(
+                  width: 280,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFE8E8F0)),
+                    ),
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Header
+                        Row(
+                          children: [
+                            Text('Search History',
+                                style: Theme.of(context).textTheme.titleLarge),
+                            const Spacer(),
+                            GestureDetector(
+                              onTap: _reset,
+                              child: const Text('Reset',
+                                  style: TextStyle(fontFamily: 'DM Sans', fontSize: 12,
+                                      color: Color(0xFF9999AA))),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+
+                        // From date + time on one row
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Expanded(child: _DateField(
+                              label: 'FROM DATE',
+                              value: _fromDate,
+                              onChanged: (d) => setState(() => _fromDate = d),
+                            )),
+                            const SizedBox(width: 8),
+                            SizedBox(
+                              width: 82,
+                              child: _TimeDropdown(
+                                label: 'TIME',
                                 value: _fromTime,
                                 onChanged: (v) => setState(() => _fromTime = v),
-                              )),
-                              const SizedBox(width: 12),
-                              Expanded(child: _DateField(
-                                label: 'TO DATE',
-                                value: _toDate,
-                                onChanged: (d) => setState(() => _toDate = d),
-                              )),
-                              const SizedBox(width: 12),
-                              Expanded(child: _TimeDropdown(
-                                label: 'TO TIME',
+                                compact: true,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+
+                        // To date + time on one row
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Expanded(child: _DateField(
+                              label: 'TO DATE',
+                              value: _toDate,
+                              onChanged: (d) => setState(() => _toDate = d),
+                            )),
+                            const SizedBox(width: 8),
+                            SizedBox(
+                              width: 82,
+                              child: _TimeDropdown(
+                                label: 'TIME',
                                 value: _toTime,
                                 onChanged: (v) => setState(() => _toTime = v),
                                 endOfDay: true,
-                              )),
-                            ],
-                          ),
-                          const SizedBox(height: 14),
-                          Row(
-                            children: [
-                              Expanded(child: _NumberPickerField(
-                                label: 'CALL(S) FROM',
-                                numbersProvider: _fromNumbersProvider,
-                                selected: _callsFrom,
-                                onChanged: (v) => setState(() => _callsFrom = v),
-                              )),
-                              const SizedBox(width: 12),
-                              Expanded(child: _NumberPickerField(
-                                label: 'CALL(S) TO',
-                                numbersProvider: _toNumbersProvider,
-                                selected: _callsTo,
-                                onChanged: (v) => setState(() => _callsTo = v),
-                              )),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 24),
-                    // Right: call type + dropdowns
-                    Expanded(
-                      flex: 2,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Call Type',
-                              style: TextStyle(fontFamily: 'DM Sans', fontSize: 13,
-                                  fontWeight: FontWeight.w500, color: Color(0xFF3D3D5C))),
-                          const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              _CallTypeChip(
-                                label: 'Inbound',
-                                icon: Icons.call_received_rounded,
-                                color: const Color(0xFF22C55E),
-                                checked: _inbound,
-                                onChanged: (v) => setState(() => _inbound = v),
+                                compact: true,
                               ),
-                              const SizedBox(width: 16),
-                              _CallTypeChip(
-                                label: 'Outbound',
-                                icon: Icons.call_made_rounded,
-                                color: const Color(0xFF4F6AFF),
-                                checked: _outbound,
-                                onChanged: (v) => setState(() => _outbound = v),
-                              ),
-                              const SizedBox(width: 16),
-                              _CallTypeChip(
-                                label: 'Internal',
-                                icon: Icons.call_rounded,
-                                color: const Color(0xFF6366F1),
-                                checked: _internal,
-                                onChanged: (v) => setState(() => _internal = v),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 14),
-                          _FilterDropdown(
-                            label: 'CALL ANSWERED',
-                            value: _callAnswered,
-                            items: const ['any', 'answered', 'unanswered'],
-                            onChanged: (v) => setState(() => _callAnswered = v),
-                          ),
-                          const SizedBox(height: 10),
-                          _FilterDropdown(
-                            label: 'CALL RECORDING',
-                            value: _callRecording,
-                            items: const ['Any Recording Status', 'Recorded', 'Not Recorded'],
-                            onChanged: (v) => setState(() => _callRecording = v),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
 
-          // Results toolbar
-          Row(
-            children: [
-              ElevatedButton(
-                onPressed: () {},
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFEF4444),
-                  foregroundColor: Colors.white,
-                ),
-                child: const Text('Edit History'),
-              ),
-              const SizedBox(width: 16),
-              const _Divider(),
-              const SizedBox(width: 16),
-              _CheckRow(
-                label: 'Include Call Transfers',
-                value: _includeTransfers,
-                onChanged: (v) => setState(() => _includeTransfers = v),
-              ),
-              const SizedBox(width: 20),
-              _CheckRow(
-                label: 'Include Queue Branches',
-                value: _includeQueueBranches,
-                onChanged: (v) => setState(() => _includeQueueBranches = v),
-              ),
-              const Spacer(),
-              OutlinedButton.icon(
-                onPressed: () {},
-                icon: const Icon(Icons.download_outlined, size: 15),
-                label: const Text('Download Call Data'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Results table
-          Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFFE8E8F0)),
-              ),
-              child: Column(
-                children: [
-                  // Table header
-                  Container(
-                    color: const Color(0xFFF8F8FC),
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                    child: Row(
-                      children: [
-                        const SizedBox(width: 32),
-                        const Expanded(flex: 3, child: _ColHeader('From')),
-                        const Expanded(flex: 3, child: _ColHeader('To')),
-                        const Expanded(flex: 3, child: _ColHeader('Answered By')),
-                        const Expanded(flex: 3, child: _ColHeader('Date / Time')),
-                        const Expanded(flex: 2, child: _ColHeader('Duration')),
+                        // From + To numbers on one row
                         Row(
                           children: [
-                            Switch(
-                              value: _stereo,
-                              onChanged: (v) => setState(() => _stereo = v),
-                              activeThumbColor: Colors.white,
-                              activeTrackColor: const Color(0xFF4F6AFF),
-                            ),
-                            const Text('STEREO',
-                                style: TextStyle(fontFamily: 'DM Sans', fontSize: 11,
-                                    fontWeight: FontWeight.w600, color: Color(0xFF9999AA),
-                                    letterSpacing: 0.5)),
+                            Expanded(child: _NumberPickerField(
+                              label: 'FROM',
+                              numbersProvider: _fromNumbersProvider,
+                              selected: _callsFrom,
+                              onChanged: (v) => setState(() => _callsFrom = v),
+                            )),
+                            const SizedBox(width: 8),
+                            Expanded(child: _NumberPickerField(
+                              label: 'TO',
+                              numbersProvider: _toNumbersProvider,
+                              selected: _callsTo,
+                              onChanged: (v) => setState(() => _callsTo = v),
+                            )),
                           ],
+                        ),
+                        const SizedBox(height: 10),
+
+                        // Call type — compact inline chips
+                        const _FilterLabel('CALL TYPE'),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Expanded(child: _CompactCallTypeChip(
+                              label: 'Inbound',
+                              icon: Icons.call_received_rounded,
+                              color: const Color(0xFF22C55E),
+                              checked: _inbound,
+                              onChanged: (v) => setState(() => _inbound = v),
+                            )),
+                            const SizedBox(width: 6),
+                            Expanded(child: _CompactCallTypeChip(
+                              label: 'Outbound',
+                              icon: Icons.call_made_rounded,
+                              color: const Color(0xFF4F6AFF),
+                              checked: _outbound,
+                              onChanged: (v) => setState(() => _outbound = v),
+                            )),
+                            const SizedBox(width: 6),
+                            Expanded(child: _CompactCallTypeChip(
+                              label: 'Internal',
+                              icon: Icons.call_rounded,
+                              color: const Color(0xFF6366F1),
+                              checked: _internal,
+                              onChanged: (v) => setState(() => _internal = v),
+                            )),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+
+                        _FilterDropdown(
+                          label: 'CALL ANSWERED',
+                          value: _callAnswered,
+                          items: const ['Answered / Unanswered', 'Answered Only', 'Unanswered Only'],
+                          onChanged: (v) => setState(() => _callAnswered = v),
+                        ),
+                        const SizedBox(height: 8),
+                        _FilterDropdown(
+                          label: 'CALL RECORDING',
+                          value: _callRecording,
+                          items: const ['Any Recording Status', 'Recorded', 'Not Recorded'],
+                          onChanged: (v) => setState(() => _callRecording = v),
+                        ),
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: _search,
+                            child: const Text('Search Calls'),
+                          ),
                         ),
                       ],
                     ),
                   ),
-                  const Divider(height: 1),
-                  Expanded(child: _ResultsBody(filter: _currentFilter, hasSearched: _hasSearched)),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ],
@@ -752,12 +776,14 @@ class _TimeDropdown extends StatelessWidget {
   final String value;
   final ValueChanged<String> onChanged;
   final bool endOfDay;
+  final bool compact;
 
   const _TimeDropdown({
     required this.label,
     required this.value,
     required this.onChanged,
     this.endOfDay = false,
+    this.compact = false,
   });
 
   static List<String> get _times {
@@ -780,12 +806,18 @@ class _TimeDropdown extends StatelessWidget {
         DropdownButtonFormField<String>(
           initialValue: value,
           isDense: true,
-          decoration: const InputDecoration(
-            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: InputDecoration(
+            contentPadding: EdgeInsets.symmetric(
+              horizontal: compact ? 6 : 12,
+              vertical: compact ? 8 : 10,
+            ),
           ),
           items: _times.map((t) => DropdownMenuItem(
             value: t,
-            child: Text(t, style: const TextStyle(fontFamily: 'DM Sans', fontSize: 13)),
+            child: Text(t, style: TextStyle(
+              fontFamily: 'DM Sans',
+              fontSize: compact ? 11 : 13,
+            )),
           )).toList(),
           onChanged: (v) { if (v != null) onChanged(v); },
         ),
@@ -858,38 +890,52 @@ class _NumberPickerField extends ConsumerWidget {
   }
 }
 
-class _CallTypeChip extends StatelessWidget {
+
+
+class _CompactCallTypeChip extends StatelessWidget {
   final String label;
   final IconData icon;
   final Color color;
   final bool checked;
   final ValueChanged<bool> onChanged;
-  const _CallTypeChip({
+  const _CompactCallTypeChip({
     required this.label, required this.icon, required this.color,
     required this.checked, required this.onChanged,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Icon(icon, size: 26, color: color),
-        const SizedBox(height: 4),
-        Text(label, style: const TextStyle(fontFamily: 'DM Sans', fontSize: 11,
-            color: Color(0xFF6B6B8A))),
-        const SizedBox(height: 4),
-        Checkbox(
-          value: checked,
-          onChanged: (v) => onChanged(v ?? true),
-          activeColor: const Color(0xFF4F6AFF),
-          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          visualDensity: VisualDensity.compact,
+    return GestureDetector(
+      onTap: () => onChanged(!checked),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        decoration: BoxDecoration(
+          color: checked ? color.withValues(alpha: 0.08) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: checked ? color.withValues(alpha: 0.4) : const Color(0xFFE8E8F0),
+          ),
         ),
-      ],
+        child: Row(
+          mainAxisSize: MainAxisSize.max,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 13, color: checked ? color : const Color(0xFF9999AA)),
+            const SizedBox(width: 4),
+            Flexible(child: Text(label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: 'DM Sans', fontSize: 11,
+                  fontWeight: checked ? FontWeight.w600 : FontWeight.w400,
+                  color: checked ? color : const Color(0xFF9999AA),
+                ))),
+          ],
+        ),
+      ),
     );
   }
 }
-
 
 class _FilterDropdown extends StatelessWidget {
   final String label;
@@ -961,14 +1007,6 @@ class _CheckRow extends StatelessWidget {
       ],
     );
   }
-}
-
-class _Divider extends StatelessWidget {
-  const _Divider();
-
-  @override
-  Widget build(BuildContext context) => Container(
-      width: 1, height: 24, color: const Color(0xFFE8E8F0));
 }
 
 class _ColHeader extends StatelessWidget {
