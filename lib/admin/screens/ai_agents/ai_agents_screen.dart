@@ -143,6 +143,10 @@ class QualificationQuestion {
 class AgentSettings {
   static const Object _keep = Object();
 
+  // Record identity
+  final String? id; // Supabase row id (null for unsaved new agents)
+  final String status; // 'draft' | 'active' | 'paused'
+
   // Identity
   final String businessName;
   final String agentName;
@@ -199,6 +203,8 @@ class AgentSettings {
   final bool announceRecording;
 
   const AgentSettings({
+    this.id,
+    this.status = 'draft',
     this.businessName = '',
     this.agentName = 'Alex',
     this.businessDescription = '',
@@ -258,6 +264,8 @@ class AgentSettings {
   });
 
   AgentSettings copyWith({
+    Object? id = _keep,
+    String? status,
     String? businessName,
     String? agentName,
     String? businessDescription,
@@ -305,6 +313,8 @@ class AgentSettings {
     bool? announceRecording,
   }) {
     return AgentSettings(
+      id: identical(id, _keep) ? this.id : id as String?,
+      status: status ?? this.status,
       businessName: businessName ?? this.businessName,
       agentName: agentName ?? this.agentName,
       businessDescription: businessDescription ?? this.businessDescription,
@@ -389,6 +399,8 @@ class AgentSettings {
     }
 
     return AgentSettings(
+      id: json['id'] as String?,
+      status: json['status'] as String? ?? 'draft',
       businessName: json['business_name'] as String? ?? '',
       agentName: json['agent_name'] as String? ?? 'Alex',
       businessDescription: json['business_description'] as String? ?? '',
@@ -456,6 +468,8 @@ class AgentSettings {
   }
 
   Map<String, dynamic> toJson() => {
+        if (id != null) 'id': id,
+        'status': status,
         'business_name': businessName,
         'agent_name': agentName,
         'business_description': businessDescription,
@@ -507,6 +521,74 @@ class AgentSettings {
 
 // ── Providers ─────────────────────────────────────────────────────────────────
 
+/// Fetches the company_id for the current user (cached).
+final _companyIdProvider = FutureProvider<String>((ref) async {
+  final supabase = Supabase.instance.client;
+  final userId = supabase.auth.currentUser!.id;
+  final userRow = await supabase
+      .from('users')
+      .select('company_id')
+      .eq('id', userId)
+      .single();
+  return userRow['company_id'] as String;
+});
+
+/// Lists ALL agents for the company (including drafts).
+final agentListProvider =
+    AsyncNotifierProvider<AgentListNotifier, List<AgentSettings>>(
+        AgentListNotifier.new);
+
+class AgentListNotifier extends AsyncNotifier<List<AgentSettings>> {
+  @override
+  Future<List<AgentSettings>> build() async {
+    final companyId = await ref.watch(_companyIdProvider.future);
+    final supabase = Supabase.instance.client;
+    final rows = await supabase
+        .from('agent_settings')
+        .select()
+        .eq('company_id', companyId)
+        .order('created_at', ascending: false);
+    return (rows as List)
+        .map((e) => AgentSettings.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  Future<void> saveAgent(AgentSettings settings) async {
+    final companyId = await ref.read(_companyIdProvider.future);
+    final supabase = Supabase.instance.client;
+
+    final payload = {'company_id': companyId, ...settings.toJson()};
+
+    debugPrint('[SaveAgent] company_id: $companyId, agent id: ${settings.id}');
+    debugPrint('[SaveAgent] payload keys: ${payload.keys.toList()}');
+
+    if (settings.id != null) {
+      // Update existing
+      debugPrint('[SaveAgent] Updating existing agent ${settings.id}');
+      await supabase
+          .from('agent_settings')
+          .update(payload)
+          .eq('id', settings.id!);
+      debugPrint('[SaveAgent] Update complete');
+    } else {
+      // Insert new
+      debugPrint('[SaveAgent] Inserting new agent');
+      await supabase.from('agent_settings').insert(payload);
+      debugPrint('[SaveAgent] Insert complete');
+    }
+
+    // Refresh list
+    ref.invalidateSelf();
+  }
+
+  Future<void> deleteAgent(String agentId) async {
+    final supabase = Supabase.instance.client;
+    await supabase.from('agent_settings').delete().eq('id', agentId);
+    ref.invalidateSelf();
+  }
+}
+
+// Keep backward-compat provider (reads the first agent or defaults).
 final agentSettingsProvider =
     AsyncNotifierProvider<AgentSettingsNotifier, AgentSettings>(
         AgentSettingsNotifier.new);
@@ -514,29 +596,12 @@ final agentSettingsProvider =
 class AgentSettingsNotifier extends AsyncNotifier<AgentSettings> {
   @override
   Future<AgentSettings> build() async {
-    final supabase = Supabase.instance.client;
-    final userId = supabase.auth.currentUser!.id;
-    final userRow = await supabase
-        .from('users')
-        .select('company_id')
-        .eq('id', userId)
-        .single();
-    final companyId = userRow['company_id'] as String;
-    final result = await supabase
-        .from('agent_settings')
-        .select()
-        .eq('company_id', companyId)
-        .maybeSingle();
-    return result != null
-        ? AgentSettings.fromJson(result)
-        : const AgentSettings();
+    final agents = await ref.watch(agentListProvider.future);
+    return agents.isNotEmpty ? agents.first : const AgentSettings();
   }
 
   Future<void> save(AgentSettings settings, String companyId) async {
-    final supabase = Supabase.instance.client;
-    await supabase.from('agent_settings').upsert(
-        {'company_id': companyId, ...settings.toJson()},
-        onConflict: 'company_id');
+    await ref.read(agentListProvider.notifier).saveAgent(settings);
     state = AsyncData(settings);
   }
 }
@@ -611,7 +676,9 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
   AgentSettings? _draft;
   bool _isDirty = false;
   bool _isSaving = false;
-  String? _companyId;
+
+  /// The id of the agent currently being edited (null = new unsaved agent).
+  String? _editingAgentId;
 
   void _patch(AgentSettings updated) {
     setState(() {
@@ -620,38 +687,52 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
     });
   }
 
+  void _selectAgent(AgentSettings agent) {
+    setState(() {
+      _draft = agent;
+      _editingAgentId = agent.id;
+      _isDirty = false;
+      _selectedTab = 0;
+    });
+  }
+
+  void _createNewAgent() {
+    setState(() {
+      _draft = const AgentSettings();
+      _editingAgentId = null;
+      _isDirty = true;
+      _selectedTab = 0;
+    });
+  }
+
   Future<void> _save() async {
     if (_draft == null) return;
 
-    // Fetch companyId fresh if not yet cached
-    if (_companyId == null) {
-      final supabase = Supabase.instance.client;
-      final userId = supabase.auth.currentUser!.id;
-      final userRow = await supabase
-          .from('users')
-          .select('company_id')
-          .eq('id', userId)
-          .single();
-      _companyId = userRow['company_id'] as String;
-    }
-
     setState(() => _isSaving = true);
     try {
-      final supabase = Supabase.instance.client;
-
       // 1. Save settings to Supabase
-      await ref
-          .read(agentSettingsProvider.notifier)
-          .save(_draft!, _companyId!);
+      await ref.read(agentListProvider.notifier).saveAgent(_draft!);
 
-      // 2. Push to Telnyx via Edge Function
-      final res = await supabase.functions.invoke(
-        'telnyx-push-agent',
-        body: {'company_id': _companyId},
-      );
-
-      if (res.status != 200) {
-        throw Exception('Telnyx sync failed: ${res.data}');
+      // 2. Try to push to Telnyx via Edge Function (non-blocking)
+      String? telnyxWarning;
+      try {
+        final supabase = Supabase.instance.client;
+        final companyId = await ref.read(_companyIdProvider.future);
+        debugPrint('[TelnyxSync] Invoking telnyx-push-agent with company_id: $companyId');
+        final res = await supabase.functions.invoke(
+          'telnyx-push-agent',
+          body: {'company_id': companyId},
+        );
+        debugPrint('[TelnyxSync] Response status: ${res.status}');
+        debugPrint('[TelnyxSync] Response data: ${res.data}');
+        if (res.status != 200) {
+          telnyxWarning = 'Telnyx sync failed (status ${res.status})';
+          debugPrint('[TelnyxSync] WARNING: $telnyxWarning');
+        }
+      } catch (e, st) {
+        telnyxWarning = 'Telnyx sync unavailable';
+        debugPrint('[TelnyxSync] ERROR: $e');
+        debugPrint('[TelnyxSync] Stack trace: $st');
       }
 
       if (mounted) {
@@ -661,9 +742,12 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Settings saved & synced to Telnyx',
+            content: Text(
+                telnyxWarning != null
+                    ? 'Settings saved. $telnyxWarning'
+                    : 'Settings saved & synced to Telnyx',
                 style: _T.body(color: Colors.white)),
-            backgroundColor: _T.green,
+            backgroundColor: telnyxWarning != null ? _T.amber : _T.green,
             behavior: SnackBarBehavior.floating,
             shape:
                 RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -692,9 +776,9 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final asyncSettings = ref.watch(agentSettingsProvider);
+    final asyncAgents = ref.watch(agentListProvider);
 
-    return asyncSettings.when(
+    return asyncAgents.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (err, _) => Center(
         child: Padding(
@@ -704,114 +788,356 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
             children: [
               Icon(Icons.error_outline, color: _T.red, size: 48),
               const SizedBox(height: 16),
-              Text('Failed to load settings',
+              Text('Failed to load agents',
                   style: _T.label(size: 16, color: _T.red)),
               const SizedBox(height: 8),
               Text(err.toString(), style: _T.body(color: _T.sub)),
               const SizedBox(height: 16),
               OutlinedButton(
-                onPressed: () =>
-                    ref.invalidate(agentSettingsProvider),
+                onPressed: () => ref.invalidate(agentListProvider),
                 child: const Text('Retry'),
               ),
             ],
           ),
         ),
       ),
-      data: (loaded) {
-        _draft ??= loaded;
+      data: (agents) {
+        // Auto-select the first agent if we have no draft yet
+        if (_draft == null && agents.isNotEmpty) {
+          _draft = agents.first;
+          _editingAgentId = agents.first.id;
+        }
+        _draft ??= const AgentSettings();
 
-        final s = _draft ?? const AgentSettings();
+        final s = _draft!;
 
-        return Column(
+        return Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(28, 28, 28, 0),
+            // ── Left: Form area ──
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('AI Agents',
-                      style: _T.label(
-                          size: 22,
-                          weight: FontWeight.w700,
-                          color: _T.brand)),
-                  const SizedBox(height: 4),
-                  Text('Configure your AI receptionist',
-                      style: _T.body(color: _T.sub)),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              decoration: const BoxDecoration(
-                color: _T.card,
-                border: Border(
-                  bottom: BorderSide(color: _T.border),
-                ),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-              child: Row(
-                children: [
-                  for (final (i, label) in [
-                    (0, 'Identity'),
-                    (1, 'Call Qualification'),
-                    (2, 'Routing & Escalation'),
-                    (3, 'Keywords'),
-                    (4, 'Behaviour'),
-                  ])
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: GestureDetector(
-                        onTap: () => setState(() => _selectedTab = i),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 150),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: _selectedTab == i
-                                ? _T.accentLight
-                                : Colors.transparent,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _selectedTab == i
-                                  ? _T.accent.withValues(alpha: 0.3)
-                                  : Colors.transparent,
-                            ),
-                          ),
-                          child: Text(
-                            label,
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(28, 28, 28, 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('AI Agents',
                             style: _T.label(
-                              size: 13,
-                              weight: _selectedTab == i
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                              color: _selectedTab == i ? _T.accent : _T.sub,
-                            ),
-                          ),
-                        ),
+                                size: 22,
+                                weight: FontWeight.w700,
+                                color: _T.brand)),
+                        const SizedBox(height: 4),
+                        Text('Configure your AI receptionist',
+                            style: _T.body(color: _T.sub)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    decoration: const BoxDecoration(
+                      color: _T.card,
+                      border: Border(
+                        bottom: BorderSide(color: _T.border),
                       ),
                     ),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final (i, label) in [
+                            (0, 'Identity'),
+                            (1, 'Call Qualification'),
+                            (2, 'Routing & Escalation'),
+                            (3, 'Keywords'),
+                            (4, 'Behaviour'),
+                          ])
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: GestureDetector(
+                              onTap: () => setState(() => _selectedTab = i),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 150),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 14, vertical: 7),
+                                decoration: BoxDecoration(
+                                  color: _selectedTab == i
+                                      ? _T.accentLight
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                    color: _selectedTab == i
+                                        ? _T.accent.withValues(alpha: 0.3)
+                                        : Colors.transparent,
+                                  ),
+                                ),
+                                child: Text(
+                                  label,
+                                  style: _T.label(
+                                    size: 13,
+                                    weight: _selectedTab == i
+                                        ? FontWeight.w600
+                                        : FontWeight.w400,
+                                    color:
+                                        _selectedTab == i ? _T.accent : _T.sub,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: IndexedStack(
+                      index: _selectedTab,
+                      children: [
+                        _IdentityTab(settings: s, onPatch: _patch),
+                        _CallQualificationTab(settings: s, onPatch: _patch),
+                        _RoutingEscalationTab(settings: s, onPatch: _patch),
+                        _KeywordsTab(settings: s, onPatch: _patch),
+                        _BehaviourTab(settings: s, onPatch: _patch),
+                      ],
+                    ),
+                  ),
+                  if (_isDirty)
+                    _SaveBar(isSaving: _isSaving, onSave: _save),
                 ],
               ),
             ),
-            Expanded(
-              child: IndexedStack(
-                index: _selectedTab,
-                children: [
-                  _IdentityTab(settings: s, onPatch: _patch),
-                  _CallQualificationTab(settings: s, onPatch: _patch),
-                  _RoutingEscalationTab(settings: s, onPatch: _patch),
-                  _KeywordsTab(settings: s, onPatch: _patch),
-                  _BehaviourTab(settings: s, onPatch: _patch),
-                ],
+
+            // ── Right: Agents list panel ──
+            Container(
+              width: 280,
+              decoration: const BoxDecoration(
+                color: _T.card,
+                border: Border(left: BorderSide(color: _T.border)),
+              ),
+              child: _AgentListPanel(
+                agents: agents,
+                selectedAgentId: _editingAgentId,
+                onSelect: _selectAgent,
+                onCreateNew: _createNewAgent,
               ),
             ),
-            if (_isDirty)
-              _SaveBar(isSaving: _isSaving, onSave: _save),
           ],
         );
       },
+    );
+  }
+}
+
+// ── Agent List Panel (right side) ────────────────────────────────────────────
+
+class _AgentListPanel extends StatelessWidget {
+  final List<AgentSettings> agents;
+  final String? selectedAgentId;
+  final void Function(AgentSettings) onSelect;
+  final VoidCallback onCreateNew;
+
+  const _AgentListPanel({
+    required this.agents,
+    required this.selectedAgentId,
+    required this.onSelect,
+    required this.onCreateNew,
+  });
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case 'active':
+        return _T.green;
+      case 'paused':
+        return _T.amber;
+      default:
+        return _T.muted;
+    }
+  }
+
+  String _statusLabel(String status) {
+    switch (status) {
+      case 'active':
+        return 'Active';
+      case 'paused':
+        return 'Paused';
+      default:
+        return 'Draft';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 24, 16, 4),
+          child: Row(
+            children: [
+              Text('All Agents',
+                  style: _T.label(
+                      size: 14,
+                      weight: FontWeight.w700,
+                      color: _T.brand)),
+              const Spacer(),
+              IconButton(
+                onPressed: onCreateNew,
+                icon: const Icon(Icons.add_circle_outline,
+                    size: 20, color: _T.accent),
+                tooltip: 'New agent',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            '${agents.length} agent${agents.length == 1 ? '' : 's'}',
+            style: _T.body(size: 12, color: _T.sub),
+          ),
+        ),
+        const SizedBox(height: 12),
+        const Divider(height: 1, color: _T.border),
+
+        // List
+        Expanded(
+          child: agents.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.smart_toy_outlined,
+                            size: 40, color: _T.muted),
+                        const SizedBox(height: 12),
+                        Text('No agents yet',
+                            style: _T.label(
+                                size: 13,
+                                weight: FontWeight.w500,
+                                color: _T.sub)),
+                        const SizedBox(height: 4),
+                        Text('Create your first AI agent',
+                            style: _T.body(size: 12, color: _T.muted)),
+                        const SizedBox(height: 16),
+                        OutlinedButton.icon(
+                          onPressed: onCreateNew,
+                          icon: const Icon(Icons.add, size: 16),
+                          label: Text('New Agent',
+                              style: _T.label(size: 12, color: _T.accent)),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: _T.accent,
+                            side: const BorderSide(color: _T.accent),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: agents.length,
+                  separatorBuilder: (_, _) =>
+                      const Divider(height: 1, color: _T.border),
+                  itemBuilder: (context, index) {
+                    final agent = agents[index];
+                    final isSelected = agent.id == selectedAgentId;
+                    return InkWell(
+                      onTap: () => onSelect(agent),
+                      child: Container(
+                        color: isSelected
+                            ? _T.accentLight
+                            : Colors.transparent,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 12),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                color: isSelected
+                                    ? _T.accent.withValues(alpha: 0.1)
+                                    : _T.inputFill,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Icon(
+                                Icons.smart_toy_outlined,
+                                size: 18,
+                                color: isSelected ? _T.accent : _T.sub,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    agent.agentName.isEmpty
+                                        ? 'Unnamed Agent'
+                                        : agent.agentName,
+                                    style: _T.label(
+                                      size: 13,
+                                      weight: isSelected
+                                          ? FontWeight.w600
+                                          : FontWeight.w500,
+                                      color: isSelected
+                                          ? _T.accent
+                                          : _T.text,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    agent.businessName.isEmpty
+                                        ? 'No business'
+                                        : agent.businessName,
+                                    style: _T.body(
+                                        size: 11, color: _T.muted),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: _statusColor(agent.status)
+                                    .withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                _statusLabel(agent.status),
+                                style: TextStyle(
+                                  fontFamily: _T.fontFamily,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                  color: _statusColor(agent.status),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }

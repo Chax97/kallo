@@ -1,0 +1,2 @@
+[telnyx-push-agent]
+verify_jwt = true
