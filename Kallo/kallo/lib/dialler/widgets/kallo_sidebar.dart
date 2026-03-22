@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/providers/dialler_providers.dart';
+import '../../main.dart' show AuthScreen;
 
 class KalloSidebar extends ConsumerWidget {
   const KalloSidebar({super.key});
@@ -71,19 +72,10 @@ class KalloSidebar extends ConsumerWidget {
           ),
           const SizedBox(height: 8),
           // ── Avatar ────────────────────────────────────────────────
-          Tooltip(
-            message: displayName,
-            child: Container(
-              margin: const EdgeInsets.only(bottom: 16),
-              child: CircleAvatar(
-                radius: 16,
-                backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-                backgroundColor: const Color(0xFF5B52E8),
-                child: avatarUrl == null
-                    ? Text(initials, style: GoogleFonts.dmSans(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600))
-                    : null,
-              ),
-            ),
+          _AvatarMenuButton(
+            displayName: displayName,
+            initials: initials,
+            avatarUrl: avatarUrl,
           ),
         ],
       ),
@@ -102,6 +94,76 @@ class _NavItemData {
   final String label;
   final int index;
   const _NavItemData({required this.icon, required this.label, required this.index});
+}
+
+class _AvatarMenuButton extends StatelessWidget {
+  final String displayName;
+  final String initials;
+  final String? avatarUrl;
+
+  const _AvatarMenuButton({
+    required this.displayName,
+    required this.initials,
+    this.avatarUrl,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: PopupMenuButton<String>(
+        offset: const Offset(64, 0),
+        color: const Color(0xFF1A1A2E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        onSelected: (value) async {
+          if (value == 'sign_out') {
+            await Supabase.instance.client.auth.signOut();
+            if (context.mounted) {
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const AuthScreen()),
+                (route) => false,
+              );
+            }
+          }
+        },
+        itemBuilder: (context) => [
+          PopupMenuItem<String>(
+            enabled: false,
+            child: Text(
+              displayName,
+              style: GoogleFonts.dmSans(
+                color: Colors.white70,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const PopupMenuDivider(),
+          PopupMenuItem<String>(
+            value: 'sign_out',
+            child: Row(
+              children: [
+                const Icon(Icons.logout, size: 16, color: Color(0xFFEF4444)),
+                const SizedBox(width: 8),
+                Text(
+                  'Sign out',
+                  style: GoogleFonts.dmSans(color: const Color(0xFFEF4444), fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ],
+        child: CircleAvatar(
+          radius: 16,
+          backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl!) : null,
+          backgroundColor: const Color(0xFF5B52E8),
+          child: avatarUrl == null
+              ? Text(initials, style: GoogleFonts.dmSans(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600))
+              : null,
+        ),
+      ),
+    );
+  }
 }
 
 class _SidebarNavItem extends StatefulWidget {

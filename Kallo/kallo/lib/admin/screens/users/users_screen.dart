@@ -158,7 +158,7 @@ class _UsersTable extends ConsumerWidget {
           Expanded(
             child: ListView.separated(
               itemCount: users.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
+              separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) => _UserRow(
                 user: users[index],
                 onRefresh: () => ref.invalidate(usersProvider),
