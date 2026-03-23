@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\fiasa\git\repository\kallo\build\windows\x64\CMakeFiles\e4c34760570bf2ae559e7426a9a76caf\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{2A4F6241-8368-353E-A548-EC31CDD159D5}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

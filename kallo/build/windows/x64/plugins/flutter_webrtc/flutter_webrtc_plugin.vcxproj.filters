@@ -1,0 +1,49 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_common.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_data_channel.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_frame_cryptor.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_media_stream.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_peerconnection.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_frame_capturer.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_video_renderer.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_screen_capture.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_webrtc.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\common\cpp\src\flutter_webrtc_base.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\windows\flutter_webrtc_plugin.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\windows\task_runner_windows.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\fiasa\git\repository\kallo\windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc\windows\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4AF1B2AC-ECA2-3D12-BEA4-855BE642FBC4}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,28 @@
+^C:\USERS\FIASA\GIT\REPOSITORY\KALLO\BUILD\WINDOWS\X64\CMAKEFILES\DA6151F2EC0D19172CE98FC12316110F\FLUTTER_WINDOWS.DLL.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E env FLUTTER_ROOT=C:\Users\fiasa\VSCode\flutter PROJECT_DIR=C:\Users\fiasa\git\repository\Kallo FLUTTER_ROOT=C:\Users\fiasa\VSCode\flutter FLUTTER_EPHEMERAL_DIR=C:\Users\fiasa\git\repository\Kallo\windows\flutter\ephemeral PROJECT_DIR=C:\Users\fiasa\git\repository\Kallo FLUTTER_TARGET=C:\Users\fiasa\git\repository\Kallo\lib\main.dart DART_DEFINES=RkxVVFRFUl9WRVJTSU9OPTMuNDEuNA==,RkxVVFRFUl9DSEFOTkVMPXN0YWJsZQ==,RkxVVFRFUl9HSVRfVVJMPWh0dHBzOi8vZ2l0aHViLmNvbS9mbHV0dGVyL2ZsdXR0ZXIuZ2l0,RkxVVFRFUl9GUkFNRVdPUktfUkVWSVNJT049ZmYzN2JlZjYwMw==,RkxVVFRFUl9FTkdJTkVfUkVWSVNJT049ZTRiOGRjYTNmMQ==,RkxVVFRFUl9EQVJUX1ZFUlNJT049My4xMS4x DART_OBFUSCATION=false TRACK_WIDGET_CREATION=true TREE_SHAKE_ICONS=false PACKAGE_CONFIG=C:\Users\fiasa\git\repository\Kallo\.dart_tool\package_config.json C:/Users/fiasa/VSCode/flutter/packages/flutter_tools/bin/tool_backend.bat windows-x64 Debug
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\USERS\FIASA\GIT\REPOSITORY\KALLO\BUILD\WINDOWS\X64\CMAKEFILES\5FEE9BC2E51C59463AB6F6FF15E99390\FLUTTER_ASSEMBLE.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\USERS\FIASA\GIT\REPOSITORY\KALLO\WINDOWS\FLUTTER\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/fiasa/git/repository/kallo/windows -BC:/Users/fiasa/git/repository/kallo/build/windows/x64 --check-stamp-file C:/Users/fiasa/git/repository/kallo/build/windows/x64/flutter/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

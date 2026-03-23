@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\fiasa\git\repository\kallo\build\windows\x64\_deps\nuget-subbuild\CMakeFiles\6ea318829957289780252ac4ffdeb386\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{E594FFAE-5497-368F-8618-7D10132C4064}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
