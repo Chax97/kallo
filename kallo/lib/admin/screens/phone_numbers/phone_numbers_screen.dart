@@ -5,70 +5,43 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
-class _VerifiedNumber {
+class _PhoneNumber {
   final String id;
   final String phoneNumber;
   final String label;
-  final String status;
+  final String? telnyxNumberId;
+  final String? assignedToUser;
+  final String? status;
 
-  const _VerifiedNumber({
+  const _PhoneNumber({
     required this.id,
     required this.phoneNumber,
     required this.label,
-    required this.status,
+    this.telnyxNumberId,
+    this.assignedToUser,
+    this.status,
   });
 
-  factory _VerifiedNumber.fromJson(Map<String, dynamic> json) {
-    // /v2/phone_numbers: tags is a list, friendly_name or id as label fallback
-    final tags = json['tags'] as List<dynamic>?;
-    final label = (tags != null && tags.isNotEmpty)
-        ? tags.first.toString()
-        : (json['friendly_name']?.toString() ?? '');
-    return _VerifiedNumber(
-      id: json['id']?.toString() ?? '',
-      phoneNumber: json['phone_number']?.toString() ?? '',
-      label: label,
-      status: json['status']?.toString() ?? '',
+  factory _PhoneNumber.fromRow(Map<String, dynamic> row) {
+    return _PhoneNumber(
+      id: row['id']?.toString() ?? '',
+      phoneNumber: row['number']?.toString() ?? '',
+      label: row['label']?.toString() ?? '',
+      telnyxNumberId: row['telnyx_number_id']?.toString(),
+      assignedToUser: row['assigned_to_user']?.toString(),
+      status: row['status']?.toString(),
     );
-  }
-
-  /// E.g. "+442033552116" → countryCode: "+44", area: "20", local: "33552116"
-  String get countryCode {
-    if (phoneNumber.startsWith('+44')) return 'GB +44';
-    if (phoneNumber.startsWith('+1')) return 'US +1';
-    if (phoneNumber.startsWith('+61')) return 'AU +61';
-    if (phoneNumber.startsWith('+353')) return 'IE +353';
-    if (phoneNumber.startsWith('+49')) return 'DE +49';
-    if (phoneNumber.startsWith('+33')) return 'FR +33';
-    return phoneNumber.isNotEmpty ? phoneNumber.substring(0, 3) : '';
-  }
-
-  String get areaCode {
-    // Strip leading +, then skip the country code digits and grab next 2-3 digits
-    final digits = phoneNumber.replaceFirst('+', '');
-    if (phoneNumber.startsWith('+44') && digits.length > 2) return digits.substring(2, 4);
-    if (phoneNumber.startsWith('+1') && digits.length > 1) return digits.substring(1, 4);
-    if (phoneNumber.startsWith('+61') && digits.length > 2) return digits.substring(2, 3);
-    return '';
-  }
-
-  String get localNumber {
-    final digits = phoneNumber.replaceFirst('+', '');
-    if (phoneNumber.startsWith('+44') && digits.length > 4) return digits.substring(4);
-    if (phoneNumber.startsWith('+1') && digits.length > 4) return digits.substring(4);
-    if (phoneNumber.startsWith('+61') && digits.length > 3) return digits.substring(3);
-    return digits;
   }
 
   String get flagEmoji {
     if (phoneNumber.startsWith('+44')) return '🇬🇧';
-    if (phoneNumber.startsWith('+1')) return '🇺🇸';
     if (phoneNumber.startsWith('+61')) return '🇦🇺';
-    if (phoneNumber.startsWith('+353')) return '🇮🇪';
-    if (phoneNumber.startsWith('+49')) return '🇩🇪';
-    if (phoneNumber.startsWith('+33')) return '🇫🇷';
+    if (phoneNumber.startsWith('+1'))  return '🇺🇸';
     return '🌐';
   }
+
+  bool get isAssigned =>
+      assignedToUser != null && assignedToUser!.isNotEmpty;
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -85,14 +58,16 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
   final _searchController = TextEditingController();
   String _searchQuery = '';
 
-  List<_VerifiedNumber> _numbers = [];
+  String? _companyId;
+  List<_PhoneNumber> _numbers = [];
   bool _loading = true;
   String? _error;
+  bool _syncing = false;
 
   @override
   void initState() {
     super.initState();
-    _fetchNumbers();
+    _loadCompanyAndNumbers();
   }
 
   @override
@@ -101,32 +76,119 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
     super.dispose();
   }
 
-  Future<void> _fetchNumbers() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  Future<void> _loadCompanyAndNumbers() async {
     try {
-      final supabase = Supabase.instance.client;
-      final res = await supabase.functions.invoke('telnyx-list-numbers');
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user == null) throw Exception('Not authenticated');
+      final profile = await Supabase.instance.client
+          .from('users')
+          .select('company_id')
+          .eq('id', user.id)
+          .single();
+      _companyId = profile['company_id']?.toString();
+      await _fetchNumbers();
+    } catch (e) {
+      setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
 
-      if (res.data == null) throw Exception('No data returned');
-
-      final raw = res.data as Map<String, dynamic>;
-      final dataList = raw['data'] as List<dynamic>? ?? [];
-      final numbers = dataList
-          .map((e) => _VerifiedNumber.fromJson(e as Map<String, dynamic>))
-          .toList();
+  Future<void> _fetchNumbers() async {
+    if (_companyId == null) return;
+    setState(() { _loading = true; _error = null; });
+    try {
+      final res = await Supabase.instance.client
+          .from('phone_numbers')
+          .select('id, number, label, telnyx_number_id, assigned_to_user, status')
+          .eq('company_id', _companyId!)
+          .order('created_at', ascending: false);
 
       setState(() {
-        _numbers = numbers;
+        _numbers = (res as List)
+            .map((e) => _PhoneNumber.fromRow(e as Map<String, dynamic>))
+            .toList();
         _loading = false;
       });
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-        _loading = false;
-      });
+      setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
+  Future<void> _syncNumbers() async {
+    if (_companyId == null) return;
+    setState(() => _syncing = true);
+    try {
+      final res = await Supabase.instance.client.functions.invoke(
+        'telnyx-sync-numbers',
+        body: {'company_id': _companyId},
+      );
+      if (res.status != 200) {
+        throw Exception(res.data?['error'] ?? 'Sync failed');
+      }
+      await _fetchNumbers();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Sync failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  Future<void> _showEditDialog(_PhoneNumber number) async {
+    await showDialog(
+      context: context,
+      builder: (_) => _EditLabelDialog(
+        numberId: number.id,
+        currentLabel: number.label,
+        onSaved: _fetchNumbers,
+      ),
+    );
+  }
+
+  Future<void> _showDeleteDialog(_PhoneNumber number) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Text('Remove Number',
+            style: TextStyle(fontFamily: 'DM Sans', fontSize: 16,
+                fontWeight: FontWeight.w600)),
+        content: Text(
+          'Remove ${number.phoneNumber} from your account? This cannot be undone.',
+          style: const TextStyle(fontFamily: 'DM Sans', fontSize: 13,
+              color: Color(0xFF6B6B8A)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFEF4444),
+                foregroundColor: Colors.white),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      try {
+        await Supabase.instance.client
+            .from('phone_numbers')
+            .delete()
+            .eq('id', number.id);
+        await _fetchNumbers();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to remove number: $e')),
+          );
+        }
+      }
     }
   }
 
@@ -134,8 +196,7 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
   Widget build(BuildContext context) {
     final filtered = _numbers.where((r) =>
       r.phoneNumber.contains(_searchQuery) ||
-      r.label.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-      r.status.toLowerCase().contains(_searchQuery.toLowerCase()),
+      r.label.toLowerCase().contains(_searchQuery.toLowerCase()),
     ).toList();
 
     return Padding(
@@ -196,9 +257,12 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
                 child: Tooltip(
                   message: 'Buy a number',
                   child: ElevatedButton(
-                    onPressed: () => showDialog(
+                    onPressed: _companyId == null ? null : () => showDialog(
                       context: context,
-                      builder: (_) => const _BuyNumbersDialog(),
+                      builder: (_) => _BuyNumbersDialog(
+                        companyId: _companyId!,
+                        onPurchased: _fetchNumbers,
+                      ),
                     ),
                     style: ElevatedButton.styleFrom(padding: EdgeInsets.zero),
                     child: const Icon(Icons.add, size: 18),
@@ -233,11 +297,9 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
     );
   }
 
-  Widget _buildBody(List<_VerifiedNumber> filtered) {
+  Widget _buildBody(List<_PhoneNumber> filtered) {
     if (_loading) {
-      return const Center(
-        child: CircularProgressIndicator(),
-      );
+      return const Center(child: CircularProgressIndicator());
     }
     if (_error != null) {
       return Center(
@@ -246,27 +308,50 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
           children: [
             const Icon(Icons.error_outline, size: 32, color: Color(0xFFEF4444)),
             const SizedBox(height: 8),
-            Text(
-              'Failed to load numbers',
-              style: const TextStyle(fontFamily: 'DM Sans', fontSize: 13,
-                  fontWeight: FontWeight.w600, color: Color(0xFF3D3D5C)),
-            ),
+            const Text('Failed to load numbers',
+                style: TextStyle(fontFamily: 'DM Sans', fontSize: 13,
+                    fontWeight: FontWeight.w600, color: Color(0xFF3D3D5C))),
             const SizedBox(height: 4),
-            Text(
-              _error!,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontFamily: 'DM Sans', fontSize: 12,
-                  color: Color(0xFF9999AA)),
-            ),
+            Text(_error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontFamily: 'DM Sans', fontSize: 12,
+                    color: Color(0xFF9999AA))),
             const SizedBox(height: 12),
             ElevatedButton(onPressed: _fetchNumbers, child: const Text('Retry')),
           ],
         ),
       );
     }
+    if (filtered.isEmpty && _numbers.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.phone_outlined, size: 36, color: Color(0xFF9999AA)),
+            const SizedBox(height: 12),
+            const Text('No phone numbers yet.',
+                style: TextStyle(fontFamily: 'DM Sans', fontSize: 14,
+                    fontWeight: FontWeight.w600, color: Color(0xFF3D3D5C))),
+            const SizedBox(height: 4),
+            const Text('Import your existing Telnyx numbers or buy a new one.',
+                style: TextStyle(fontFamily: 'DM Sans', fontSize: 12,
+                    color: Color(0xFF9999AA))),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _syncing ? null : _syncNumbers,
+              icon: _syncing
+                  ? const SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.download_outlined, size: 16),
+              label: Text(_syncing ? 'Importing…' : 'Import from Telnyx'),
+            ),
+          ],
+        ),
+      );
+    }
     if (filtered.isEmpty) {
       return const Center(
-        child: Text('No numbers found.',
+        child: Text('No numbers match your search.',
             style: TextStyle(fontFamily: 'DM Sans', fontSize: 13,
                 color: Color(0xFF9999AA))),
       );
@@ -274,7 +359,11 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
     return ListView.separated(
       itemCount: filtered.length,
       separatorBuilder: (_, _) => const Divider(height: 1),
-      itemBuilder: (context, i) => _NumberRow(number: filtered[i]),
+      itemBuilder: (context, i) => _NumberRow(
+        number: filtered[i],
+        onEdit:   () => _showEditDialog(filtered[i]),
+        onDelete: () => _showDeleteDialog(filtered[i]),
+      ),
     );
   }
 }
@@ -412,6 +501,7 @@ class _TableHeader extends StatelessWidget {
           _HeaderCell('Phone Number', flex: 4),
           _HeaderCell('Label',        flex: 3),
           _HeaderCell('Status',       flex: 2),
+          _HeaderCell('Assigned',     flex: 2),
           SizedBox(width: 80),
         ],
       ),
@@ -434,29 +524,70 @@ class _HeaderCell extends StatelessWidget {
   }
 }
 
-class _NumberRow extends StatelessWidget {
-  final _VerifiedNumber number;
-  const _NumberRow({required this.number});
+class _StatusBadge extends StatelessWidget {
+  final String? status;
+  const _StatusBadge({this.status});
+
+  static const _colors = <String, Color>{
+    'active':           Color(0xFF22C55E),
+    'purchase_pending': Color(0xFFF59E0B),
+    'purchase_failed':  Color(0xFFEF4444),
+    'port_pending':     Color(0xFFF59E0B),
+    'port_failed':      Color(0xFFEF4444),
+    'ported_out':       Color(0xFF9999AA),
+    'port_out_pending': Color(0xFFF59E0B),
+    'emergency_only':   Color(0xFFEF4444),
+    'deleted':          Color(0xFF9999AA),
+  };
 
   @override
   Widget build(BuildContext context) {
-    final isVerified = number.status == 'verified' || number.status == 'active';
+    final raw = status ?? 'unknown';
+    final label = raw.replaceAll('_', ' ');
+    final color = _colors[raw] ?? const Color(0xFF9999AA);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontFamily: 'DM Sans', fontSize: 11, fontWeight: FontWeight.w500,
+          color: color,
+        ),
+      ),
+    );
+  }
+}
+
+class _NumberRow extends StatelessWidget {
+  final _PhoneNumber number;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+  const _NumberRow({
+    required this.number,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
       child: Row(
         children: [
-          // Phone Number (flag + full E.164)
+          // Phone Number (flag + full E.164) — tap to copy
           Expanded(
             flex: 4,
             child: GestureDetector(
               onTap: () {
                 Clipboard.setData(ClipboardData(text: number.phoneNumber));
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('${number.phoneNumber} copied to clipboard'),
-                    duration: const Duration(seconds: 2),
-                  ),
-                );
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text('${number.phoneNumber} copied to clipboard'),
+                  duration: const Duration(seconds: 2),
+                ));
               },
               child: MouseRegion(
                 cursor: SystemMouseCursors.click,
@@ -464,9 +595,9 @@ class _NumberRow extends StatelessWidget {
                   children: [
                     Text(number.flagEmoji, style: const TextStyle(fontSize: 16)),
                     const SizedBox(width: 8),
-                    Text(number.phoneNumber, style: const TextStyle(
-                        fontFamily: 'DM Sans', fontSize: 13,
-                        fontWeight: FontWeight.w500, color: Color(0xFF4F6AFF))),
+                    Text(number.phoneNumber,
+                        style: const TextStyle(fontFamily: 'DM Sans', fontSize: 13,
+                            fontWeight: FontWeight.w500, color: Color(0xFF4F6AFF))),
                     const SizedBox(width: 6),
                     const Icon(Icons.copy_outlined, size: 12, color: Color(0xFF9999AA)),
                   ],
@@ -487,22 +618,36 @@ class _NumberRow extends StatelessWidget {
               ),
             ),
           ),
-          // Status
+          // Status badge
           Expanded(
             flex: 2,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: isVerified
-                    ? const Color(0xFF22C55E).withValues(alpha: 0.1)
-                    : const Color(0xFFF59E0B).withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(
-                number.status.isEmpty ? 'unknown' : number.status,
-                style: TextStyle(
-                  fontFamily: 'DM Sans', fontSize: 11, fontWeight: FontWeight.w500,
-                  color: isVerified ? const Color(0xFF16A34A) : const Color(0xFFD97706),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: _StatusBadge(status: number.status),
+            ),
+          ),
+          // Assigned badge
+          Expanded(
+            flex: 2,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: number.isAssigned
+                      ? const Color(0xFF4F6AFF).withValues(alpha: 0.1)
+                      : const Color(0xFF9999AA).withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  number.isAssigned ? 'assigned' : 'unassigned',
+                  style: TextStyle(
+                    fontFamily: 'DM Sans', fontSize: 11, fontWeight: FontWeight.w500,
+                    color: number.isAssigned
+                        ? const Color(0xFF4F6AFF) : const Color(0xFF9999AA),
+                  ),
                 ),
               ),
             ),
@@ -516,19 +661,108 @@ class _NumberRow extends StatelessWidget {
                 _CircleIconButton(
                   icon: Icons.edit_outlined,
                   color: const Color(0xFF4F6AFF),
-                  onTap: () {},
+                  onTap: onEdit,
                 ),
                 const SizedBox(width: 8),
                 _CircleIconButton(
                   icon: Icons.delete_outline,
                   color: const Color(0xFFEF4444),
-                  onTap: () {},
+                  onTap: onDelete,
                 ),
               ],
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Edit Label Dialog ─────────────────────────────────────────────────────────
+
+class _EditLabelDialog extends StatefulWidget {
+  final String numberId;
+  final String currentLabel;
+  final VoidCallback onSaved;
+  const _EditLabelDialog({
+    required this.numberId,
+    required this.currentLabel,
+    required this.onSaved,
+  });
+
+  @override
+  State<_EditLabelDialog> createState() => _EditLabelDialogState();
+}
+
+class _EditLabelDialogState extends State<_EditLabelDialog> {
+  late final TextEditingController _controller;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.currentLabel);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      await Supabase.instance.client
+          .from('phone_numbers')
+          .update({'label': _controller.text.trim()})
+          .eq('id', widget.numberId);
+      widget.onSaved();
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      setState(() => _saving = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      title: const Text('Edit Label',
+          style: TextStyle(fontFamily: 'DM Sans', fontSize: 16,
+              fontWeight: FontWeight.w600)),
+      content: SizedBox(
+        width: 320,
+        child: TextField(
+          controller: _controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Label',
+            hintText: 'e.g. Main Office',
+            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            isDense: true,
+          ),
+          onSubmitted: (_) => _save(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _saving ? null : _save,
+          child: _saving
+              ? const SizedBox(width: 14, height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Text('Save'),
+        ),
+      ],
     );
   }
 }
@@ -605,7 +839,9 @@ class _AvailableNumber {
 }
 
 class _BuyNumbersDialog extends StatefulWidget {
-  const _BuyNumbersDialog();
+  final String companyId;
+  final VoidCallback onPurchased;
+  const _BuyNumbersDialog({required this.companyId, required this.onPurchased});
 
   @override
   State<_BuyNumbersDialog> createState() => _BuyNumbersDialogState();
@@ -615,11 +851,7 @@ class _BuyNumbersDialogState extends State<_BuyNumbersDialog> {
   // Maps display label → API value (null = omit filter)
   static const _countryMap = {
     'United Kingdom +44': 'GB',
-    'United States +1':   'US',
     'Australia +61':      'AU',
-    'Ireland +353':       'IE',
-    'Germany +49':        'DE',
-    'France +33':         'FR',
   };
   static const _featureMap = {
     'Any feature': null,
@@ -653,6 +885,8 @@ class _BuyNumbersDialogState extends State<_BuyNumbersDialog> {
   List<_AvailableNumber> _results = [];
   bool   _hasSearched = false;
   int    _totalResults = 0;
+  bool   _purchasing  = false;
+  String? _purchaseError;
 
   @override
   void dispose() {
@@ -718,6 +952,34 @@ class _BuyNumbersDialogState extends State<_BuyNumbersDialog> {
         _searchError = e.toString();
         _searching   = false;
       });
+    }
+  }
+
+  Future<void> _purchaseNumber(_AvailableNumber number) async {
+    setState(() { _purchasing = true; _purchaseError = null; });
+    try {
+      final res = await Supabase.instance.client.functions.invoke(
+        'telnyx-buy-number',
+        body: {
+          'phone_number': number.phoneNumber,
+          'company_id':   widget.companyId,
+        },
+      );
+      final data = res.data as Map<String, dynamic>;
+      if (data['error'] != null) throw Exception(data['error']);
+
+      widget.onPurchased();
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      setState(() {
+        _purchaseError = e.toString();
+        _purchasing    = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Purchase failed: $e')),
+        );
+      }
     }
   }
 
@@ -1027,8 +1289,11 @@ class _BuyNumbersDialogState extends State<_BuyNumbersDialog> {
                                 physics: const NeverScrollableScrollPhysics(),
                                 itemCount: _results.length,
                                 separatorBuilder: (_, _) => const Divider(height: 1),
-                                itemBuilder: (_, i) =>
-                                    _AvailableNumberRow(number: _results[i]),
+                                itemBuilder: (_, i) => _AvailableNumberRow(
+                                  number: _results[i],
+                                  onSelect: () => _purchaseNumber(_results[i]),
+                                  purchasing: _purchasing,
+                                ),
                               ),
                             ],
                           ),
@@ -1061,7 +1326,13 @@ class _ResultHeaderCell extends StatelessWidget {
 
 class _AvailableNumberRow extends StatelessWidget {
   final _AvailableNumber number;
-  const _AvailableNumberRow({required this.number});
+  final VoidCallback onSelect;
+  final bool purchasing;
+  const _AvailableNumberRow({
+    required this.number,
+    required this.onSelect,
+    required this.purchasing,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1117,7 +1388,7 @@ class _AvailableNumberRow extends StatelessWidget {
             child: Align(
               alignment: Alignment.centerRight,
               child: OutlinedButton(
-                onPressed: () {},
+                onPressed: purchasing ? null : onSelect,
                 style: OutlinedButton.styleFrom(
                   foregroundColor: const Color(0xFF4F6AFF),
                   side: const BorderSide(color: Color(0xFF4F6AFF)),
@@ -1127,7 +1398,10 @@ class _AvailableNumberRow extends StatelessWidget {
                   textStyle: const TextStyle(fontFamily: 'DM Sans', fontSize: 12,
                       fontWeight: FontWeight.w500),
                 ),
-                child: const Text('Select'),
+                child: purchasing
+                    ? const SizedBox(width: 12, height: 12,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Select'),
               ),
             ),
           ),
