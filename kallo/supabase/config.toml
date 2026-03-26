@@ -15,6 +15,16 @@ enabled = true
 verify_jwt = true
 entrypoint = "./functions/telnyx-hangup/index.ts"
 
+[functions.telnyx-search-numbers]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-search-numbers/index.ts"
+
+[functions.telnyx-list-numbers]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-list-numbers/index.ts"
+
 [functions.telnyx-push-agent]
 enabled = true
 verify_jwt = true
