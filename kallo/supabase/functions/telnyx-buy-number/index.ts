@@ -20,7 +20,7 @@ Deno.serve(async (req) => {
   try {
     if (!TELNYX_API_KEY) throw new Error("TELNYX_API_KEY not set")
 
-    const { phone_number, company_id, label } = await req.json()
+    const { phone_number, company_id, label, regulatory_requirements } = await req.json()
     if (!phone_number) throw new Error("phone_number is required")
     if (!company_id)   throw new Error("company_id is required")
 
@@ -39,6 +39,9 @@ Deno.serve(async (req) => {
     }
     if (company?.telnyx_connection_id) {
       orderBody.connection_id = company.telnyx_connection_id
+    }
+    if (Array.isArray(regulatory_requirements) && regulatory_requirements.length > 0) {
+      orderBody.regulatory_requirements = regulatory_requirements
     }
 
     console.log(`[telnyx-buy-number] ordering ${phone_number} for company ${company_id}`)

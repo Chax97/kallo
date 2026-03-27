@@ -15,6 +15,21 @@ enabled = true
 verify_jwt = true
 entrypoint = "./functions/telnyx-hangup/index.ts"
 
+[functions.telnyx-push-kyc-document]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-push-kyc-document/index.ts"
+
+[functions.telnyx-upload-document]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-upload-document/index.ts"
+
+[functions.telnyx-get-requirements]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-get-requirements/index.ts"
+
 [functions.telnyx-sync-numbers]
 enabled = true
 verify_jwt = false
@@ -34,6 +49,11 @@ entrypoint = "./functions/telnyx-search-numbers/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/telnyx-list-numbers/index.ts"
+
+[functions.telnyx-fulfill-and-order]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-fulfill-and-order/index.ts"
 
 [functions.telnyx-push-agent]
 enabled = true
