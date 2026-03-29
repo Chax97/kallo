@@ -209,12 +209,18 @@ Deno.serve(async (req) => {
       model: isEnglish ? "deepgram/flux" : "deepgram/nova-3",
     }
 
-    payload.telephony_settings = {
-      noise_suppression: "krisp",
+    // Set webhook URL so AI assistant call events flow to our edge function
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!
+    const webhookUrl = `${supabaseUrl}/functions/v1/telnyx-webhook`
+
+    payload.telephony = {
       ...(agent.record_calls ? {
         recording_settings: { enabled: true },
       } : {}),
     }
+
+    // Set the webhook at the assistant level
+    payload.webhook_url = webhookUrl
 
     let telnyxAssistantId: string = agent.telnyx_assistant_id
     let texmlAppId: string | null = agent.telnyx_texml_app_id ?? null
@@ -246,6 +252,51 @@ Deno.serve(async (req) => {
         ?? (getData?.default_texml_app_id as string)
         ?? null
       console.log("[push-agent] extracted texml_app_id:", texmlAppId)
+    }
+
+    // Configure the TeXML app's webhook so call events reach our edge function
+    if (texmlAppId) {
+      console.log("[push-agent] configuring TeXML app webhook:", texmlAppId)
+      try {
+        // Try TeXML Applications API
+        const texmlPatchRes = await fetch(`${TELNYX_API_BASE}/texml_applications/${texmlAppId}`, {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${TELNYX_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            // IMPORTANT: voice_url must stay as the AI assistant's TeXML handler
+            voice_url: `${TELNYX_API_BASE}/ai/assistants/${telnyxAssistantId}/texml`,
+            voice_method: "POST",
+            // status_callback receives call events (initiated, answered, hangup, etc.)
+            status_callback: webhookUrl,
+            status_callback_method: "POST",
+          }),
+        })
+        const texmlPatchJson = await texmlPatchRes.json()
+        console.log(`[push-agent] TeXML app PATCH response ${texmlPatchRes.status}:`, JSON.stringify(texmlPatchJson))
+
+        if (!texmlPatchRes.ok) {
+          // Fallback: try Call Control Applications API
+          console.log("[push-agent] TeXML PATCH failed, trying call_control_applications")
+          const ccPatchRes = await fetch(`${TELNYX_API_BASE}/call_control_applications/${texmlAppId}`, {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bearer ${TELNYX_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              webhook_event_url: webhookUrl,
+              webhook_event_failover_url: webhookUrl,
+            }),
+          })
+          const ccPatchJson = await ccPatchRes.json()
+          console.log(`[push-agent] call_control_applications PATCH response ${ccPatchRes.status}:`, JSON.stringify(ccPatchJson))
+        }
+      } catch (e) {
+        console.error("[push-agent] failed to configure TeXML webhook:", e)
+      }
     }
 
     // Save both IDs

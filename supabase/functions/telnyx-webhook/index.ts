@@ -16,6 +16,12 @@ interface TelnyxCallPayload {
   recording_started_at?: string
   recording_ended_at?: string
   client_state?: string
+  // TeXML analyzed event fields (raw strings from form data)
+  _recordings?: string
+  _conversation_insights?: string
+  _conversation_id?: string
+  _answered_time?: string
+  _call_duration?: string
 }
 
 interface TelnyxEvent {
@@ -64,11 +70,72 @@ function decodeClientState(encoded?: string): Record<string, unknown> {
 }
 
 Deno.serve(async (req) => {
+  const contentType = req.headers.get("content-type") ?? ""
   let payload: TelnyxEvent
-  try {
-    payload = await req.json()
-  } catch {
-    return new Response("Bad Request", { status: 400 })
+
+  // TeXML status_callback sends form-urlencoded; normal webhooks send JSON
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    const formData = await req.formData()
+    const formObj: Record<string, string> = {}
+    formData.forEach((value, key) => { formObj[key] = value.toString() })
+    console.log("TeXML status_callback form data:", JSON.stringify(formObj))
+
+    // Map TeXML status_callback fields to our standard format
+    const callStatus = formObj["CallStatus"] ?? formObj["callstatus"] ?? ""
+    const eventMap: Record<string, string> = {
+      "ringing": "call.initiated",
+      "in-progress": "call.answered",
+      "completed": "call.hangup",
+      "busy": "call.hangup",
+      "no-answer": "call.hangup",
+      "failed": "call.hangup",
+      "canceled": "call.hangup",
+      "analyzed": "call.analyzed",
+    }
+    // If no CallStatus but has CallInitiatedAt, this is the initial call event
+    let mappedEvent = eventMap[callStatus.toLowerCase()] ?? ""
+    if (!mappedEvent && (formObj["CallInitiatedAt"] || formObj["CallerId"])) {
+      mappedEvent = "call.initiated"
+    }
+
+    const hangupCause = callStatus.toLowerCase() === "completed" ? "normal_clearing"
+      : callStatus.toLowerCase() === "no-answer" ? "no_answer"
+      : callStatus.toLowerCase() === "busy" ? "busy"
+      : callStatus.toLowerCase() === "canceled" ? "originator_cancel"
+      : callStatus || undefined
+
+    payload = {
+      data: {
+        event_type: mappedEvent || undefined,
+        payload: {
+          call_control_id: formObj["CallSid"] ?? formObj["callsid"] ?? undefined,
+          call_leg_id: formObj["CallLegId"] ?? formObj["CallControlId"] ?? undefined,
+          call_session_id: formObj["CallSessionId"] ?? formObj["CallSid"] ?? undefined,
+          direction: "incoming", // TeXML status_callback is always inbound to the AI assistant
+          from: formObj["From"] ?? formObj["Caller"] ?? formObj["CallerId"] ?? undefined,
+          to: formObj["To"] ?? formObj["Called"] ?? undefined,
+          start_time: formObj["StartTime"] ?? formObj["CallInitiatedAt"] ?? undefined,
+          hangup_cause: hangupCause,
+          duration_millis: formObj["CallDuration"] ? parseInt(formObj["CallDuration"]) * 1000 : undefined,
+          // Mark as AI assistant call so we skip SIP dial logic
+          client_state: btoa(JSON.stringify({ stage: "ai_assistant" })),
+          // Pass analyzed event fields
+          _recordings: formObj["Recordings"] ?? undefined,
+          _conversation_insights: formObj["ConversationInsights"] ?? undefined,
+          _conversation_id: formObj["ConversationId"] ?? undefined,
+          _answered_time: formObj["AnsweredTime"] ?? undefined,
+          _call_duration: formObj["CallDuration"] ?? undefined,
+        },
+      },
+    }
+  } else {
+    try {
+      payload = await req.json()
+    } catch {
+      const rawBody = await req.text()
+      console.log("Failed to parse request body:", rawBody.substring(0, 500))
+      return new Response("Bad Request", { status: 400 })
+    }
   }
 
   const eventType = payload?.data?.event_type
@@ -93,7 +160,7 @@ Deno.serve(async (req) => {
       // Skip SIP b-leg records — they are internal routing legs and should
       // not appear in the call history.
       if (!isToSipUser) {
-        await supabase.from("call_logs").upsert({
+        const callRecord = {
           call_control_id: callData.call_control_id,
           call_leg_id: callData.call_leg_id,
           call_session_id: callData.call_session_id,
@@ -102,7 +169,33 @@ Deno.serve(async (req) => {
           to_number: callData.to,
           state: "initiated",
           started_at: new Date().toISOString(),
-        }, { onConflict: "call_control_id" })
+        }
+        await supabase.from("call_logs").upsert(callRecord, { onConflict: "call_control_id" })
+
+        // Also write to `calls` table (used by the admin portal)
+        // Look up company_id from the phone number (to_number for inbound, from_number for outbound)
+        const didNumber = callData.direction === "incoming" ? callData.to : callData.from
+        let companyId: string | null = null
+        if (didNumber) {
+          const { data: phoneRow } = await supabase
+            .from("phone_numbers")
+            .select("company_id")
+            .eq("number", didNumber)
+            .maybeSingle()
+          companyId = phoneRow?.company_id ?? null
+        }
+
+        await supabase.from("calls").upsert({
+          telnyx_call_id: callData.call_control_id,
+          call_leg_id: callData.call_leg_id,
+          call_session_id: callData.call_session_id,
+          direction: callData.direction === "incoming" ? "inbound" : "outbound",
+          from_number: callData.from,
+          to_number: callData.to,
+          status: "initiated",
+          started_at: new Date().toISOString(),
+          ...(companyId ? { company_id: companyId } : {}),
+        }, { onConflict: "telnyx_call_id" })
       }
 
       // Dial the SIP user only for fresh inbound calls on the DID.
@@ -135,10 +228,16 @@ Deno.serve(async (req) => {
     }
 
     case "call.answered": {
+      const answeredAt = new Date().toISOString()
       await supabase
         .from("call_logs")
-        .update({ state: "answered", answered_at: new Date().toISOString() })
+        .update({ state: "answered", answered_at: answeredAt })
         .eq("call_control_id", callData.call_control_id)
+
+      await supabase
+        .from("calls")
+        .update({ status: "answered", answered_at: answeredAt })
+        .eq("telnyx_call_id", callData.call_control_id)
 
       if (cs?.stage === "dial" && cs?.inbound_call_control_id) {
         // App answered the SIP b-leg — bridge it to the original inbound a-leg
@@ -228,6 +327,31 @@ Deno.serve(async (req) => {
         .maybeSingle()
 
       if (!callLog) {
+        // Check if it exists in the calls table (AI assistant calls write there directly)
+        const { data: callRow } = await supabase
+          .from("calls")
+          .select("direction, status")
+          .eq("telnyx_call_id", callData.call_control_id)
+          .maybeSingle()
+
+        if (callRow) {
+          console.log(`Hangup: found in calls table, updating`)
+          const durationSecs = callData.start_time
+            ? Math.floor((Date.now() - new Date(callData.start_time).getTime()) / 1000)
+            : null
+          await supabase
+            .from("calls")
+            .update({
+              status: isCompleted ? "completed" : "missed",
+              state: isCompleted ? "completed" : "missed",
+              ended_at: new Date().toISOString(),
+              hangup_cause: hangupCause,
+              duration_seconds: durationSecs,
+            })
+            .eq("telnyx_call_id", callData.call_control_id)
+          break
+        }
+
         console.log(`Hangup: no record found for ${callData.call_control_id} — skipping`)
         break
       }
@@ -244,15 +368,27 @@ Deno.serve(async (req) => {
 
       console.log(`Hangup DB update: direction=${direction}, cause=${hangupCause}, finalState=${finalState}`)
 
+      const endedAt = new Date().toISOString()
       await supabase
         .from("call_logs")
         .update({
           state: finalState,
-          ended_at: new Date().toISOString(),
+          ended_at: endedAt,
           hangup_cause: hangupCause,
           duration_seconds: durationSeconds,
         })
         .eq("call_control_id", callData.call_control_id)
+
+      await supabase
+        .from("calls")
+        .update({
+          status: finalState,
+          state: finalState,
+          ended_at: endedAt,
+          hangup_cause: hangupCause,
+          duration_seconds: durationSeconds,
+        })
+        .eq("telnyx_call_id", callData.call_control_id)
       break
     }
 
@@ -318,6 +454,120 @@ Deno.serve(async (req) => {
           ...(isVoicemail ? { state: "voicemail" } : {}),
         })
         .eq("call_control_id", callData.call_control_id)
+
+      await supabase
+        .from("calls")
+        .update({
+          recording_url: recordingUrl,
+          ...(savedStoragePath ? { storage_path: savedStoragePath } : {}),
+          ...(isVoicemail ? { status: "voicemail" } : {}),
+        })
+        .eq("telnyx_call_id", callData.call_control_id)
+      break
+    }
+
+    case "call.analyzed": {
+      // Post-call analysis from AI assistant — contains recordings, insights, transcript
+      console.log("[analyzed] Processing AI assistant post-call data for", callData.call_control_id)
+
+      let recordingUrl: string | null = null
+      let durationSeconds: number | null = null
+      let storagePath: string | null = null
+
+      // Parse recordings
+      try {
+        const recordings = JSON.parse(callData._recordings ?? "[]")
+        if (Array.isArray(recordings) && recordings.length > 0) {
+          const rec = recordings[0]
+          recordingUrl = rec.download_urls?.mp3 ?? null
+          if (rec.start_time && rec.end_time) {
+            durationSeconds = Math.round(
+              (new Date(rec.end_time).getTime() - new Date(rec.start_time).getTime()) / 1000
+            )
+          }
+          console.log("[analyzed] recording URL:", recordingUrl, "duration:", durationSeconds)
+        }
+      } catch (e) {
+        console.error("[analyzed] failed to parse recordings:", e)
+      }
+
+      // Parse conversation insights
+      let insightSummary: string | null = null
+      try {
+        const insights = JSON.parse(callData._conversation_insights ?? "[]")
+        if (Array.isArray(insights) && insights.length > 0) {
+          const results = insights[0]?.conversation_insights
+          if (Array.isArray(results) && results.length > 0) {
+            insightSummary = results[0]?.result ?? null
+          }
+        }
+        console.log("[analyzed] insight summary:", insightSummary?.substring(0, 100))
+      } catch (e) {
+        console.error("[analyzed] failed to parse insights:", e)
+      }
+
+      // Download and store the recording
+      if (recordingUrl) {
+        try {
+          const audioRes = await fetch(recordingUrl)
+          const audioBlob = await audioRes.blob()
+          const safeId = (callData.call_control_id ?? "unknown").replace(/[^a-zA-Z0-9\-_]/g, "_")
+          const fileName = `${safeId}-${Date.now()}.mp3`
+
+          const { error: storageError } = await supabase.storage
+            .from("call_recordings")
+            .upload(fileName, audioBlob, { contentType: "audio/mpeg", upsert: true })
+
+          if (storageError) {
+            console.error("[analyzed] storage error:", storageError.message)
+          } else {
+            storagePath = fileName
+            console.log("[analyzed] recording saved:", storagePath)
+          }
+        } catch (e) {
+          console.error("[analyzed] recording download error:", e)
+        }
+      }
+
+      // Look up the phone number to get company_id
+      const didNumber = callData.to
+      let companyId: string | null = null
+      if (didNumber) {
+        const { data: phoneRow } = await supabase
+          .from("phone_numbers")
+          .select("company_id")
+          .eq("number", didNumber)
+          .maybeSingle()
+        companyId = phoneRow?.company_id ?? null
+      }
+
+      // Upsert into calls table with all the AI assistant data
+      const callDurationSecs = callData._call_duration ? parseInt(callData._call_duration) : durationSeconds
+      const { error: upsertError } = await supabase.from("calls").upsert({
+        telnyx_call_id: callData.call_control_id,
+        call_session_id: callData.call_session_id,
+        direction: "inbound",
+        from_number: callData.from,
+        to_number: callData.to,
+        status: "completed",
+        state: "completed",
+        started_at: callData.start_time ?? callData._answered_time,
+        answered_at: callData._answered_time,
+        ended_at: new Date().toISOString(),
+        duration_seconds: callDurationSecs,
+        recording_url: recordingUrl,
+        storage_path: storagePath,
+        hangup_cause: "normal_clearing",
+        answered_by: "ai_assistant",
+        ...(companyId ? { company_id: companyId } : {}),
+      }, { onConflict: "telnyx_call_id" })
+
+      if (upsertError) {
+        console.error("[analyzed] calls upsert error:", upsertError.message)
+      } else {
+        console.log("[analyzed] call record saved/updated")
+      }
+
       break
     }
 

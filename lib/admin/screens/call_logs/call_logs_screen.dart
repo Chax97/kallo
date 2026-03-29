@@ -350,7 +350,8 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
                       border: Border.all(color: const Color(0xFFE8E8F0)),
                     ),
                     padding: const EdgeInsets.all(16),
-                    child: Column(
+                    child: SingleChildScrollView(
+                      child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -491,6 +492,7 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
                           ),
                         ),
                       ],
+                    ),
                     ),
                   ),
                 ),
