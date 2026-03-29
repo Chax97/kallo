@@ -194,6 +194,91 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
     }
   }
 
+  Future<void> _showVerifyDialog(_PhoneNumber number) async {
+    if (_companyId == null) return;
+
+    final countryCode = number.phoneNumber.startsWith('+44') ? 'GB'
+        : number.phoneNumber.startsWith('+61') ? 'AU'
+        : number.phoneNumber.startsWith('+1')  ? 'US'
+        : 'GB';
+
+    // Determine phone number type from existing KYC or default to "local"
+    String numberType = 'local';
+    final existingKyc = await Supabase.instance.client
+        .from('company_kyc')
+        .select('id, phone_number_type, telnyx_requirement_group_id')
+        .eq('company_id', _companyId!)
+        .eq('country_code', countryCode)
+        .maybeSingle();
+    if (existingKyc != null) {
+      numberType = existingKyc['phone_number_type']?.toString() ?? 'local';
+    }
+
+    // Fetch requirements from Telnyx
+    final res = await Supabase.instance.client.functions.invoke(
+      'telnyx-get-requirements',
+      body: {
+        'country_code':      countryCode,
+        'phone_number_type': numberType,
+        'action':            'ordering',
+      },
+    );
+
+    final requirements = (res.data['data'] as List<dynamic>? ?? []);
+
+    if (!mounted) return;
+
+    if (requirements.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No verification requirements found for this number.')),
+      );
+      return;
+    }
+
+    final kycId = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _VerificationWizard(
+        phoneNumber:  number.phoneNumber,
+        companyId:    _companyId!,
+        requirements: requirements,
+        countryCode:  countryCode,
+        numberType:   numberType,
+        submitLabel:  'Submit',
+      ),
+    );
+
+    if (kycId != null && mounted) {
+      // Call fulfill-and-order to submit the KYC and update the number
+      try {
+        final fulfillRes = await Supabase.instance.client.functions.invoke(
+          'telnyx-fulfill-and-order',
+          body: {
+            'phone_number': number.phoneNumber,
+            'company_id':   _companyId,
+            'kyc_id':       kycId,
+            'verify_only':  true,
+          },
+        );
+        if (fulfillRes.status != 200) {
+          throw Exception(fulfillRes.data?['error'] ?? 'Fulfillment failed');
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Verification submitted successfully.')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Verification failed: $e')),
+          );
+        }
+      }
+      await _fetchNumbers();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final filtered = _numbers.where((r) =>
@@ -365,6 +450,7 @@ class _PhoneNumbersScreenState extends ConsumerState<PhoneNumbersScreen> {
         number: filtered[i],
         onEdit:   () => _showEditDialog(filtered[i]),
         onDelete: () => _showDeleteDialog(filtered[i]),
+        onVerify: () => _showVerifyDialog(filtered[i]),
       ),
     );
   }
@@ -538,8 +624,11 @@ class _StatusBadge extends StatelessWidget {
     'port_failed':      Color(0xFFEF4444),
     'ported_out':       Color(0xFF9999AA),
     'port_out_pending': Color(0xFFF59E0B),
-    'emergency_only':   Color(0xFFEF4444),
-    'deleted':          Color(0xFF9999AA),
+    'emergency_only':          Color(0xFFEF4444),
+    'deleted':                 Color(0xFF9999AA),
+    'requirement_info_pending':  Color(0xFFF59E0B),
+    'pending':                  Color(0xFFF59E0B),
+    'verification_submitted':   Color(0xFFF59E0B),
   };
 
   @override
@@ -568,11 +657,18 @@ class _NumberRow extends StatelessWidget {
   final _PhoneNumber number;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
+  final VoidCallback? onVerify;
   const _NumberRow({
     required this.number,
     required this.onEdit,
     required this.onDelete,
+    this.onVerify,
   });
+
+  bool get _needsVerification {
+    final s = number.status ?? '';
+    return s == 'requirement_info_pending' || s == 'pending' || s == 'purchase_pending';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -656,10 +752,32 @@ class _NumberRow extends StatelessWidget {
           ),
           // Actions
           SizedBox(
-            width: 80,
+            width: _needsVerification ? 160 : 80,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
+                if (_needsVerification && onVerify != null) ...[
+                  SizedBox(
+                    height: 28,
+                    child: ElevatedButton(
+                      onPressed: onVerify,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFF59E0B),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        textStyle: const TextStyle(
+                          fontFamily: 'DM Sans', fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      child: const Text('Verify'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 _CircleIconButton(
                   icon: Icons.edit_outlined,
                   color: const Color(0xFF4F6AFF),
@@ -1427,12 +1545,14 @@ class _VerificationWizard extends StatefulWidget {
   final String countryCode;
   final String numberType;
   final List<dynamic> requirements;
+  final String submitLabel;
   const _VerificationWizard({
     required this.phoneNumber,
     required this.companyId,
     required this.countryCode,
     required this.numberType,
     required this.requirements,
+    this.submitLabel = 'Confirm and Purchase',
   });
 
   @override
@@ -1487,7 +1607,7 @@ class _VerificationWizardState extends State<_VerificationWizard> {
           .single();
       final company = await supabase
           .from('companies')
-          .select('name, website_url, address_line1, address_line2, city, postcode, country')
+          .select('name, website_url, address_line1, address_line2, city, state, postcode, country')
           .eq('id', widget.companyId)
           .single();
       final cachedDocs = await supabase
@@ -1518,6 +1638,7 @@ class _VerificationWizardState extends State<_VerificationWizard> {
             'line1':    TextEditingController(text: company['address_line1']?.toString() ?? ''),
             'line2':    TextEditingController(text: company['address_line2']?.toString() ?? ''),
             'city':     TextEditingController(text: company['city']?.toString() ?? ''),
+            'state':    TextEditingController(text: company['state']?.toString() ?? ''),
             'postcode': TextEditingController(text: company['postcode']?.toString() ?? ''),
             'country':  TextEditingController(text: company['country']?.toString() ?? ''),
           };
@@ -1689,25 +1810,41 @@ class _VerificationWizardState extends State<_VerificationWizard> {
   ) async {
     final supabase = Supabase.instance.client;
 
-    // Supersede existing row for this requirement on this kyc record
-    await supabase
+    // Check if there's already an active (non-superseded) row for this requirement
+    final existing = await supabase
         .from('company_kyc_documents')
-        .update({'is_superseded': true})
+        .select('id')
         .eq('kyc_id', kycId)
         .eq('requirement_type_id', reqId)
-        .eq('is_superseded', false);
+        .eq('is_superseded', false)
+        .maybeSingle();
 
-    await supabase.from('company_kyc_documents').insert({
-      'company_id':          widget.companyId,
-      'kyc_id':              kycId,
-      'requirement_type_id': reqId,
-      'requirement_name':    req['name']?.toString() ?? '',
-      'document_type':       req['type']?.toString() ?? '',
-      'field_value':         value,
-      'status':              'stored',
-      'delete_after':
-          DateTime.now().add(const Duration(days: 365 * 7)).toIso8601String(),
-    });
+    if (existing != null) {
+      // Update the existing row in place
+      await supabase
+          .from('company_kyc_documents')
+          .update({
+            'requirement_name': req['name']?.toString() ?? '',
+            'document_type':    req['type']?.toString() ?? '',
+            'field_value':      value,
+            'status':           'stored',
+            'delete_after':
+                DateTime.now().add(const Duration(days: 365 * 7)).toIso8601String(),
+          })
+          .eq('id', existing['id']);
+    } else {
+      await supabase.from('company_kyc_documents').insert({
+        'company_id':          widget.companyId,
+        'kyc_id':              kycId,
+        'requirement_type_id': reqId,
+        'requirement_name':    req['name']?.toString() ?? '',
+        'document_type':       req['type']?.toString() ?? '',
+        'field_value':         value,
+        'status':              'stored',
+        'delete_after':
+            DateTime.now().add(const Duration(days: 365 * 7)).toIso8601String(),
+      });
+    }
   }
 
   Future<void> _submit() async {
@@ -1782,6 +1919,7 @@ class _VerificationWizardState extends State<_VerificationWizard> {
             ctrl['line1']!.text.trim(),
             ctrl['line2']!.text.trim(),
             ctrl['city']!.text.trim(),
+            ctrl['state']!.text.trim(),
             ctrl['postcode']!.text.trim(),
             ctrl['country']!.text.trim(),
           ].where((s) => s.isNotEmpty).join(', ');
@@ -1791,6 +1929,7 @@ class _VerificationWizardState extends State<_VerificationWizard> {
             'address_line1': ctrl['line1']!.text.trim(),
             'address_line2': ctrl['line2']!.text.trim(),
             'city':          ctrl['city']!.text.trim(),
+            'state':         ctrl['state']!.text.trim(),
             'postcode':      ctrl['postcode']!.text.trim(),
             'country':       ctrl['country']!.text.trim(),
           }).eq('id', widget.companyId);
@@ -1810,18 +1949,39 @@ class _VerificationWizardState extends State<_VerificationWizard> {
           final wantsReplace = _replaceDoc[reqId] ?? false;
 
           if (hasCached && !wantsReplace) {
-            // Create a stub row for this kyc_id so the edge function finds it
-            await Supabase.instance.client.from('company_kyc_documents').insert({
-              'company_id':          widget.companyId,
-              'kyc_id':              kycId,
-              'requirement_type_id': reqId,
-              'requirement_name':    req['name']?.toString() ?? '',
-              'document_type':       type,
-              'status':              'submitted',
-              'telnyx_document_id':  _cachedDocIds[reqId],
-              'delete_after':
-                  DateTime.now().add(const Duration(days: 365 * 7)).toIso8601String(),
-            });
+            // Create or update a stub row for this kyc_id so the edge function finds it
+            final existingDoc = await Supabase.instance.client
+                .from('company_kyc_documents')
+                .select('id')
+                .eq('kyc_id', kycId)
+                .eq('requirement_type_id', reqId)
+                .eq('is_superseded', false)
+                .maybeSingle();
+            if (existingDoc != null) {
+              await Supabase.instance.client
+                  .from('company_kyc_documents')
+                  .update({
+                    'requirement_name':   req['name']?.toString() ?? '',
+                    'document_type':      type,
+                    'status':             'submitted',
+                    'telnyx_document_id': _cachedDocIds[reqId],
+                    'delete_after':
+                        DateTime.now().add(const Duration(days: 365 * 7)).toIso8601String(),
+                  })
+                  .eq('id', existingDoc['id']);
+            } else {
+              await Supabase.instance.client.from('company_kyc_documents').insert({
+                'company_id':          widget.companyId,
+                'kyc_id':              kycId,
+                'requirement_type_id': reqId,
+                'requirement_name':    req['name']?.toString() ?? '',
+                'document_type':       type,
+                'status':              'submitted',
+                'telnyx_document_id':  _cachedDocIds[reqId],
+                'delete_after':
+                    DateTime.now().add(const Duration(days: 365 * 7)).toIso8601String(),
+              });
+            }
           } else {
             await _storeDocument(reqId, req, kycId);
           }
@@ -1921,6 +2081,7 @@ class _VerificationWizardState extends State<_VerificationWizard> {
                                         _WizardField(label: 'Address Line 2', hint: 'Suite, floor, building (optional)', controller: ctrl['line2']!),
                                         _WizardField(label: 'City', hint: 'London', controller: ctrl['city']!,
                                             errorText: _fieldErrors.contains('${id}_city') ? 'City is required' : null),
+                                        _WizardField(label: 'State / Province', hint: 'NSW', controller: ctrl['state']!),
                                         _WizardField(label: 'Postcode / ZIP', hint: 'SW1A 1AA', controller: ctrl['postcode']!),
                                         _WizardField(label: 'Country', hint: 'United Kingdom', controller: ctrl['country']!),
                                       ];
@@ -2114,7 +2275,7 @@ class _VerificationWizardState extends State<_VerificationWizard> {
                         ? const SizedBox(width: 16, height: 16,
                             child: CircularProgressIndicator(
                                 strokeWidth: 2, color: Colors.white))
-                        : const Text('Confirm and Purchase'),
+                        : Text(widget.submitLabel),
                   ),
                 ],
               ),
