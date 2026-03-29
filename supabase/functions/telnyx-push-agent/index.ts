@@ -1,399 +1,280 @@
 import { createClient } from "jsr:@supabase/supabase-js@2"
 
-/**
- * telnyx-push-agent
- *
- * Reads the agent_settings rows for a company, builds a system prompt from
- * each active agent's configuration, and creates / updates a Telnyx AI
- * Assistant via the Telnyx v2 API.  The resulting assistant id is stored back
- * in the agent_settings row so the webhook can route inbound calls to it.
- */
-
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 )
 
 const TELNYX_API_KEY = Deno.env.get("TELNYX_API_KEY")
-console.log("[telnyx-push-agent] TELNYX_API_KEY present:", !!TELNYX_API_KEY)
-console.log("[telnyx-push-agent] SUPABASE_URL:", Deno.env.get("SUPABASE_URL"))
+const TELNYX_API_BASE = "https://api.telnyx.com/v2"
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-interface AgentRow {
-  id: string
-  company_id: string
-  status: string
-  business_name: string
-  agent_name: string
-  business_description: string
-  business_hours: string
-  language: string
-  persona: string
-  custom_instructions: string
-  greeting: string
-  announce_ai_disclosure: boolean
-  qualification_questions: Array<{
-    question: string
-    yes_dest: string
-    no_dest: string
-    unclear_dest: string
-  }>
-  default_destination: string
-  default_transfer_number: string | null
-  transfer_on_human_request: boolean
-  transfer_on_repeat: boolean
-  transfer_on_failed_attempts: boolean
-  transfer_on_duration_exceeded: boolean
-  max_duration_minutes: number
-  escalation_transfer_number: string | null
-  out_of_hours_behaviour: string
-  out_of_hours_message: string
-  emergency_override: boolean
-  emergency_transfer_number: string | null
-  voicemail_email: string | null
-  voicemail_sms: string | null
-  include_transcript_in_email: boolean
-  termination_keywords: string[]
-  termination_action: string
-  escalation_keywords: string[]
-  keyword_escalation_number: string | null
-  priority_keywords: string[]
-  off_limits_keywords: string[]
-  deflection_message: string
-  max_response_length: string
-  speaking_pace: string
-  use_filler_words: boolean
-  confirm_caller_details: boolean
-  ask_callback_if_busy: boolean
-  silence_timeout: number
-  silence_action: string
-  silence_prompt: string
-  allow_barge_in: boolean
-  record_calls: boolean
-  generate_transcript: boolean
-  generate_ai_summary: boolean
-  announce_recording: boolean
-  telnyx_assistant_id: string | null
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
 }
-
-function buildSystemPrompt(agent: AgentRow): string {
-  const lines: string[] = []
-
-  // ── Identity ────────────────────────────────────────────────────────────
-  lines.push(`You are ${agent.agent_name}, an AI phone receptionist for ${agent.business_name || "our company"}.`)
-
-  if (agent.business_description) {
-    lines.push(`About the business: ${agent.business_description}`)
-  }
-
-  lines.push(`Business hours: ${agent.business_hours}.`)
-  lines.push(`Speak in ${agent.language}. Your tone should be ${agent.persona.toLowerCase()}.`)
-
-  if (agent.announce_ai_disclosure) {
-    lines.push("At the start of each call, inform the caller they are speaking with an AI assistant.")
-  }
-
-  if (agent.announce_recording) {
-    lines.push("Inform the caller that the call may be recorded for quality and training purposes.")
-  }
-
-  // ── Greeting ────────────────────────────────────────────────────────────
-  const greeting = agent.greeting.replace("{business_name}", agent.business_name || "our company")
-  lines.push(`\nGreeting: "${greeting}"`)
-
-  // ── Custom instructions ────────────────────────────────────────────────
-  if (agent.custom_instructions) {
-    lines.push(`\nAdditional instructions: ${agent.custom_instructions}`)
-  }
-
-  // ── Call qualification ─────────────────────────────────────────────────
-  if (agent.qualification_questions.length > 0) {
-    lines.push("\n## Call Qualification")
-    lines.push("Ask the following questions to determine how to route the call:")
-    for (const q of agent.qualification_questions) {
-      lines.push(`- "${q.question}"`)
-      lines.push(`  - If YES → ${q.yes_dest}`)
-      lines.push(`  - If NO → ${q.no_dest}`)
-      lines.push(`  - If UNCLEAR → ${q.unclear_dest}`)
-    }
-    lines.push(`If none of the above match, the default action is: ${agent.default_destination}.`)
-    if (agent.default_transfer_number) {
-      lines.push(`Default transfer number: ${agent.default_transfer_number}`)
-    }
-  }
-
-  // ── Routing & escalation ───────────────────────────────────────────────
-  lines.push("\n## Routing & Escalation Rules")
-
-  if (agent.transfer_on_human_request) {
-    lines.push("- If the caller explicitly asks to speak to a human, transfer immediately.")
-  }
-  if (agent.transfer_on_repeat) {
-    lines.push("- If the caller repeats the same request multiple times without resolution, transfer to a human.")
-  }
-  if (agent.transfer_on_failed_attempts) {
-    lines.push("- If you fail to resolve the query after several attempts, transfer to a human.")
-  }
-  if (agent.transfer_on_duration_exceeded) {
-    lines.push(`- If the call exceeds ${agent.max_duration_minutes} minutes, transfer to a human.`)
-  }
-  if (agent.escalation_transfer_number) {
-    lines.push(`Escalation transfer number: ${agent.escalation_transfer_number}`)
-  }
-
-  // ── Out of hours ───────────────────────────────────────────────────────
-  lines.push(`\nOut-of-hours behaviour: ${agent.out_of_hours_behaviour}.`)
-  if (agent.out_of_hours_message) {
-    lines.push(`Out-of-hours message: "${agent.out_of_hours_message}"`)
-  }
-
-  // ── Emergency ──────────────────────────────────────────────────────────
-  if (agent.emergency_override) {
-    lines.push("\nEmergency override is enabled. If the caller has a genuine emergency, transfer immediately.")
-    if (agent.emergency_transfer_number) {
-      lines.push(`Emergency transfer number: ${agent.emergency_transfer_number}`)
-    }
-  }
-
-  // ── Keywords ───────────────────────────────────────────────────────────
-  if (agent.termination_keywords.length > 0) {
-    lines.push(`\n## Safety Keywords`)
-    lines.push(`If the caller uses any of these words: [${agent.termination_keywords.join(", ")}]`)
-    lines.push(`Action: ${agent.termination_action}`)
-  }
-
-  if (agent.escalation_keywords.length > 0) {
-    lines.push(`\nEscalation keywords: [${agent.escalation_keywords.join(", ")}]. If detected, escalate the call.`)
-    if (agent.keyword_escalation_number) {
-      lines.push(`Keyword escalation number: ${agent.keyword_escalation_number}`)
-    }
-  }
-
-  if (agent.priority_keywords.length > 0) {
-    lines.push(`Priority keywords: [${agent.priority_keywords.join(", ")}]. Treat these callers with extra care.`)
-  }
-
-  if (agent.off_limits_keywords.length > 0) {
-    lines.push(`Off-limits topics: [${agent.off_limits_keywords.join(", ")}]. Do not discuss these topics.`)
-    if (agent.deflection_message) {
-      lines.push(`Instead say: "${agent.deflection_message}"`)
-    }
-  }
-
-  // ── Behaviour ──────────────────────────────────────────────────────────
-  lines.push("\n## Behaviour")
-  lines.push(`Response length: ${agent.max_response_length}.`)
-  lines.push(`Speaking pace: ${agent.speaking_pace}.`)
-
-  if (agent.use_filler_words) {
-    lines.push("Use natural filler words (um, well, let me see) to sound more human.")
-  } else {
-    lines.push("Avoid filler words. Be direct and concise.")
-  }
-
-  if (agent.confirm_caller_details) {
-    lines.push("Always confirm the caller's name and details before proceeding.")
-  }
-
-  if (agent.ask_callback_if_busy) {
-    lines.push("If the line is busy or no one is available, offer to arrange a callback.")
-  }
-
-  lines.push(`If the caller is silent for ${agent.silence_timeout} seconds, ${agent.silence_action.toLowerCase()}.`)
-  if (agent.silence_prompt) {
-    lines.push(`Silence prompt: "${agent.silence_prompt}"`)
-  }
-
-  if (agent.allow_barge_in) {
-    lines.push("Allow the caller to interrupt you mid-sentence.")
-  }
-
-  return lines.join("\n")
-}
-
-/** Map our language setting to a Telnyx voice language code. */
-function mapLanguage(lang: string): string {
-  const map: Record<string, string> = {
-    "English (UK)": "en-GB",
-    "English (AU)": "en-AU",
-    "English (US)": "en-US",
-    "Spanish": "es-ES",
-    "French": "fr-FR",
-    "Arabic": "ar-SA",
-    "Mandarin": "zh-CN",
-  }
-  return map[lang] ?? "en-AU"
-}
-
-/** Map persona to a Telnyx voice. */
-function mapVoice(persona: string): string {
-  // Telnyx supports "male" and "female" voices.
-  // Default to female for most personas.
-  const malePersonas = ["formal", "concise"]
-  return malePersonas.includes(persona.toLowerCase()) ? "male" : "female"
-}
-
-// ── Telnyx AI Assistant API ──────────────────────────────────────────────────
 
 async function telnyxRequest(
   method: string,
   path: string,
-  body?: Record<string, unknown>,
-): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
-  const res = await fetch(`https://api.telnyx.com/v2${path}`, {
+  body?: unknown,
+): Promise<Record<string, unknown>> {
+  const url = `${TELNYX_API_BASE}${path}`
+  console.log(`[telnyx] ${method} ${url}`, body ? JSON.stringify(body) : "")
+  const res = await fetch(url, {
     method,
     headers: {
       Authorization: `Bearer ${TELNYX_API_KEY}`,
       "Content-Type": "application/json",
     },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    body: body ? JSON.stringify(body) : undefined,
   })
-  const data = await res.json()
-  console.log(`[telnyx-push-agent] Telnyx ${method} ${path} → ${res.status}`, JSON.stringify(data))
-  return { ok: res.ok, status: res.status, data }
-}
-
-async function upsertAssistant(
-  agent: AgentRow,
-): Promise<{ assistantId: string }> {
-  const systemPrompt = buildSystemPrompt(agent)
-  const language = mapLanguage(agent.language)
-  const voice = mapVoice(agent.persona)
-
-  const assistantPayload = {
-    name: `${agent.agent_name} - ${agent.business_name || "Kallo"}`,
-    system_prompt: systemPrompt,
-    language,
-    voice,
-    first_message: agent.greeting.replace("{business_name}", agent.business_name || "our company"),
-    model: "telnyx_trained",
-    enable_recording: agent.record_calls,
-    enable_transcription: agent.generate_transcript,
-  }
-
-  // Update existing or create new
-  if (agent.telnyx_assistant_id) {
-    console.log(`Updating assistant ${agent.telnyx_assistant_id}`)
-    const res = await telnyxRequest(
-      "PATCH",
-      `/ai/assistants/${agent.telnyx_assistant_id}`,
-      assistantPayload,
-    )
-
-    if (res.ok) {
-      return { assistantId: agent.telnyx_assistant_id }
-    }
-
-    // If the assistant was deleted on Telnyx side, create a new one
-    if (res.status === 404) {
-      console.log("Assistant not found on Telnyx, creating new one")
-    } else {
-      console.error("Failed to update assistant:", JSON.stringify(res.data))
-      throw new Error(`Telnyx update failed: ${res.status}`)
-    }
-  }
-
-  // Create new assistant
-  console.log("[telnyx-push-agent] Creating new Telnyx AI assistant")
-  console.log("[telnyx-push-agent] Assistant payload:", JSON.stringify(assistantPayload, null, 2))
-  const res = await telnyxRequest("POST", "/ai/assistants", assistantPayload)
-
+  const json = await res.json()
+  console.log(`[telnyx] response ${res.status}:`, JSON.stringify(json))
   if (!res.ok) {
-    console.error("Failed to create assistant:", JSON.stringify(res.data))
-    throw new Error(`Telnyx create failed: ${res.status} — ${JSON.stringify(res.data)}`)
+    throw new Error(`Telnyx API error ${res.status}: ${JSON.stringify(json)}`)
   }
-
-  const assistantId = (res.data as Record<string, unknown>)?.data
-    ? ((res.data as Record<string, Record<string, string>>).data.id)
-    : (res.data as Record<string, string>).id
-
-  console.log("Created assistant:", assistantId)
-  return { assistantId }
+  return json
 }
 
-// ── Main handler ─────────────────────────────────────────────────────────────
+// ── Build system instructions from agent_settings fields ──────────────────────
+
+function buildInstructions(agent: Record<string, unknown>): string {
+  const lines: string[] = []
+
+  // Identity
+  lines.push(`You are ${agent.agent_name || "an AI receptionist"} at ${agent.business_name || "our company"}.`)
+  if (agent.business_description) {
+    lines.push(`About the business: ${agent.business_description}`)
+  }
+  lines.push(`Business hours: ${agent.business_hours || "Mon–Fri 9am–5pm"}.`)
+  lines.push(`Speak in ${agent.language || "English (AU)"}.`)
+  lines.push(`Your personality style is: ${agent.persona || "Professional"}.`)
+
+  if (agent.announce_ai_disclosure) {
+    lines.push("At the start of each call, disclose that the caller is speaking with an AI agent.")
+  }
+
+  if (agent.custom_instructions) {
+    lines.push(`\nAdditional instructions: ${agent.custom_instructions}`)
+  }
+
+  // Call qualification
+  const questions = agent.qualification_questions as Array<Record<string, string>> | null
+  if (questions && questions.length > 0) {
+    lines.push("\n## Call Qualification")
+    lines.push("Ask these questions in order to qualify the caller:")
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i]
+      lines.push(`${i + 1}. "${q.question}"`)
+      lines.push(`   - If YES → ${q.yes_dest}${q.yes_custom_number ? ` (${q.yes_custom_number})` : ""}`)
+      lines.push(`   - If NO → ${q.no_dest}${q.no_custom_number ? ` (${q.no_custom_number})` : ""}`)
+      lines.push(`   - If UNCLEAR → ${q.unclear_dest}${q.unclear_custom_number ? ` (${q.unclear_custom_number})` : ""}`)
+    }
+    lines.push(`Default destination for callers who pass all questions: ${agent.default_destination || "Take a message"}.`)
+    if (agent.default_transfer_number) {
+      lines.push(`Default transfer number: ${agent.default_transfer_number}`)
+    }
+  }
+
+  // Routing & Escalation
+  lines.push("\n## Routing & Escalation Rules")
+  if (agent.transfer_on_human_request) lines.push("- If the caller asks to speak to a human, transfer immediately.")
+  if (agent.transfer_on_repeat) lines.push("- If the caller repeats themselves 3 times, escalate to a human.")
+  if (agent.transfer_on_failed_attempts) lines.push("- If you cannot answer after 2 attempts, escalate to a human.")
+  if (agent.transfer_on_duration_exceeded) {
+    lines.push(`- If the call exceeds ${agent.max_duration_minutes || 10} minutes, escalate.`)
+  }
+  if (agent.escalation_transfer_number) {
+    lines.push(`Escalation transfer number: ${agent.escalation_transfer_number}`)
+  }
+
+  // Out of hours
+  lines.push(`\nOut of hours behaviour: ${agent.out_of_hours_behaviour || "Take a message and email to team"}.`)
+  if (agent.out_of_hours_message) {
+    lines.push(`Out of hours message: "${agent.out_of_hours_message}"`)
+  }
+  if (agent.emergency_override) {
+    lines.push("Emergency override is enabled — allow urgent calls to escalate even outside hours.")
+    if (agent.emergency_transfer_number) {
+      lines.push(`Emergency transfer number: ${agent.emergency_transfer_number}`)
+    }
+  }
+
+  // Keywords
+  const termKeys = agent.termination_keywords as string[] | null
+  if (termKeys && termKeys.length > 0) {
+    lines.push(`\n## Safety Keywords`)
+    lines.push(`Termination keywords (end call immediately): ${termKeys.join(", ")}`)
+    lines.push(`Action: ${agent.termination_action || "End call immediately, log incident"}`)
+  }
+
+  const escalKeys = agent.escalation_keywords as string[] | null
+  if (escalKeys && escalKeys.length > 0) {
+    lines.push(`Escalation keywords (transfer to human): ${escalKeys.join(", ")}`)
+    if (agent.keyword_escalation_number) {
+      lines.push(`Keyword escalation number: ${agent.keyword_escalation_number}`)
+    }
+  }
+
+  const priorityKeys = agent.priority_keywords as string[] | null
+  if (priorityKeys && priorityKeys.length > 0) {
+    lines.push(`Priority keywords (high-value callers): ${priorityKeys.join(", ")}`)
+  }
+
+  const offLimits = agent.off_limits_keywords as string[] | null
+  if (offLimits && offLimits.length > 0) {
+    lines.push(`Off-limits topics (do not discuss): ${offLimits.join(", ")}`)
+    if (agent.deflection_message) {
+      lines.push(`When asked about off-limits topics, say: "${agent.deflection_message}"`)
+    }
+  }
+
+  // Behaviour
+  lines.push("\n## Behaviour")
+  lines.push(`Keep responses ${agent.max_response_length || "Medium (2–4 sentences)"}.`)
+  lines.push(`Speaking pace: ${agent.speaking_pace || "Normal"}.`)
+  if (agent.use_filler_words) lines.push("Use natural filler words like 'Sure', 'Of course', 'Absolutely'.")
+  if (agent.confirm_caller_details) lines.push("Before transferring, confirm the caller's name and reason for calling.")
+  if (agent.ask_callback_if_busy) lines.push("If the line is busy, ask for a callback number.")
+  lines.push(`If the caller is silent for ${agent.silence_timeout || 8} seconds: ${agent.silence_action || "Prompt caller to respond"}.`)
+  if (agent.silence_prompt) {
+    lines.push(`Silence prompt: "${agent.silence_prompt}"`)
+  }
+  if (agent.allow_barge_in) lines.push("Allow the caller to interrupt you mid-sentence.")
+  if (agent.announce_recording) lines.push("Announce at the start that the call may be recorded.")
+
+  return lines.join("\n")
+}
 
 Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders })
+  }
+
   try {
-    const body = await req.json()
-    console.log("[telnyx-push-agent] Request body:", JSON.stringify(body))
-    const { company_id } = body
+    console.log("[push-agent] function invoked")
 
-    if (!company_id) {
-      console.error("[telnyx-push-agent] Missing company_id in request body")
-      return new Response(
-        JSON.stringify({ error: "company_id is required" }),
-        { status: 400, headers: { "Content-Type": "application/json" } },
-      )
-    }
+    if (!TELNYX_API_KEY) throw new Error("TELNYX_API_KEY env var is not set")
 
-    // Fetch all agents for this company
-    const { data: agents, error: fetchError } = await supabase
+    const rawText = await req.text()
+    console.log("[push-agent] raw body:", rawText)
+
+    if (!rawText?.trim()) throw new Error("Request body is empty")
+
+    const body = JSON.parse(rawText)
+    const agent_id = body.agent_id as string | undefined
+    if (!agent_id) throw new Error("agent_id is required")
+
+    // Fetch agent settings from DB
+    console.log("[push-agent] fetching agent_settings:", agent_id)
+    const { data: agent, error: dbError } = await supabase
       .from("agent_settings")
       .select("*")
-      .eq("company_id", company_id)
+      .eq("id", agent_id)
+      .single()
 
-    if (fetchError) {
-      console.error("DB fetch error:", fetchError.message)
-      return new Response(
-        JSON.stringify({ error: fetchError.message }),
-        { status: 500, headers: { "Content-Type": "application/json" } },
-      )
+    if (dbError) throw new Error(`DB error: ${dbError.message}`)
+    if (!agent) throw new Error(`Agent not found: ${agent_id}`)
+    console.log("[push-agent] agent:", agent.agent_name, "telnyx_assistant_id:", agent.telnyx_assistant_id)
+
+    // Build Telnyx assistant payload from agent_settings
+    const instructions = buildInstructions(agent)
+    console.log("[push-agent] instructions length:", instructions.length)
+
+    // Map language to determine if English-only (enables faster STT model)
+    const lang = (agent.language ?? "English (AU)") as string
+    const isEnglish = lang.startsWith("English")
+
+    const payload: Record<string, unknown> = {
+      name: `${agent.agent_name || "Agent"} - ${agent.business_name || "Business"}`,
+      // moonshotai/Kimi-K2.5: Telnyx recommended, no external API key required
+      model: "moonshotai/Kimi-K2.5",
+      instructions,
+      enabled_features: ["telephony"],
     }
 
-    console.log("[telnyx-push-agent] Fetched agents count:", agents?.length ?? 0)
+    if (agent.greeting) payload.greeting = agent.greeting
+    if (agent.business_description) payload.description = agent.business_description
 
-    if (!agents || agents.length === 0) {
-      console.warn("[telnyx-push-agent] No agents found for company_id:", company_id)
-      return new Response(
-        JSON.stringify({ message: "No agents found for company" }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      )
+    // Telnyx Ultra: sub-100ms TTFB, built for real-time AI assistants
+    // Falls back to KokoroTTS for non-English
+    payload.voice_settings = isEnglish
+      ? { voice: "Telnyx.Ultra.002622d8-19d0-4567-a16a-f99c7397c062" }
+      : { voice: "Telnyx.KokoroTTS.af" }
+
+    // deepgram/flux: optimised for turn-taking (English)
+    // deepgram/nova-3: recommended for multi-lingual
+    payload.transcription = {
+      model: isEnglish ? "deepgram/flux" : "deepgram/nova-3",
     }
 
-    const results: Array<{ agent_id: string; assistant_id: string; status: string }> = []
-
-    for (const agent of agents as AgentRow[]) {
-      try {
-        const { assistantId } = await upsertAssistant(agent)
-
-        // Store the assistant ID back in the database
-        if (assistantId !== agent.telnyx_assistant_id) {
-          console.log(`[telnyx-push-agent] Saving telnyx_assistant_id=${assistantId} for agent ${agent.id}`)
-          const { error: updateError } = await supabase
-            .from("agent_settings")
-            .update({ telnyx_assistant_id: assistantId })
-            .eq("id", agent.id)
-          if (updateError) {
-            console.error(`[telnyx-push-agent] Failed to save assistant ID back:`, updateError.message)
-          }
-        }
-
-        results.push({
-          agent_id: agent.id,
-          assistant_id: assistantId,
-          status: "synced",
-        })
-      } catch (err) {
-        console.error(`Failed to sync agent ${agent.id}:`, err)
-        results.push({
-          agent_id: agent.id,
-          assistant_id: agent.telnyx_assistant_id ?? "",
-          status: `error: ${(err as Error).message}`,
-        })
-      }
+    payload.telephony_settings = {
+      noise_suppression: "krisp",
+      ...(agent.record_calls ? {
+        recording_settings: { enabled: true },
+      } : {}),
     }
 
+    let telnyxAssistantId: string = agent.telnyx_assistant_id
+    let texmlAppId: string | null = agent.telnyx_texml_app_id ?? null
+
+    if (telnyxAssistantId) {
+      console.log("[push-agent] updating assistant:", telnyxAssistantId)
+      await telnyxRequest("PATCH", `/ai/assistants/${telnyxAssistantId}`, payload)
+    } else {
+      console.log("[push-agent] creating new assistant")
+      const result = await telnyxRequest("POST", `/ai/assistants`, payload)
+      const data = result.data as Record<string, unknown> | undefined
+      telnyxAssistantId = (data?.id ?? result.id) as string
+      if (!telnyxAssistantId) throw new Error("Telnyx did not return an assistant ID")
+    }
+
+    // Always GET the assistant to reliably extract the TeXML app ID
+    if (!texmlAppId) {
+      console.log("[push-agent] fetching assistant to get texml_app_id")
+      const getResult = await telnyxRequest("GET", `/ai/assistants/${telnyxAssistantId}`)
+      console.log("[push-agent] GET response keys:", JSON.stringify(Object.keys(getResult)))
+      const getData = getResult.data as Record<string, unknown> | undefined
+      console.log("[push-agent] assistant data keys:", getData ? JSON.stringify(Object.keys(getData)) : "null")
+
+      // Try multiple paths to find the TeXML app ID
+      const telSettings = (getData?.telephony_settings ?? getData?.telephony) as Record<string, unknown> | undefined
+      console.log("[push-agent] telephony_settings:", JSON.stringify(telSettings))
+      texmlAppId = (telSettings?.default_texml_app_id as string)
+        ?? (telSettings?.texml_app_id as string)
+        ?? (getData?.default_texml_app_id as string)
+        ?? null
+      console.log("[push-agent] extracted texml_app_id:", texmlAppId)
+    }
+
+    // Save both IDs
+    const updatePayload: Record<string, unknown> = {
+      telnyx_assistant_id: telnyxAssistantId,
+      status: "active",
+    }
+    if (texmlAppId) {
+      updatePayload.telnyx_texml_app_id = texmlAppId
+    }
+    const { error: updateError } = await supabase
+      .from("agent_settings")
+      .update(updatePayload)
+      .eq("id", agent_id)
+    if (updateError) {
+      console.error("[push-agent] failed to store IDs:", updateError.message)
+    }
+
+    console.log("[push-agent] success:", telnyxAssistantId, "texml:", texmlAppId)
     return new Response(
-      JSON.stringify({ results }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
+      JSON.stringify({ success: true, telnyx_assistant_id: telnyxAssistantId, telnyx_texml_app_id: texmlAppId }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
-  } catch (err) {
-    console.error("Unexpected error:", err)
-    return new Response(
-      JSON.stringify({ error: (err as Error).message }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    )
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    console.error("[push-agent] error:", message)
+    return new Response(JSON.stringify({ error: message }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    })
   }
 })

@@ -146,6 +146,11 @@ class AgentSettings {
   // Record identity
   final String? id; // Supabase row id (null for unsaved new agents)
   final String status; // 'draft' | 'active' | 'paused'
+  final String? telnyxAssistantId; // Telnyx AI assistant ID
+  final String? telnyxTexmlAppId; // Telnyx TeXML app ID for call routing
+
+  bool get isDeployed =>
+      telnyxAssistantId != null && telnyxAssistantId!.isNotEmpty;
 
   // Identity
   final String businessName;
@@ -205,6 +210,8 @@ class AgentSettings {
   const AgentSettings({
     this.id,
     this.status = 'draft',
+    this.telnyxAssistantId,
+    this.telnyxTexmlAppId,
     this.businessName = '',
     this.agentName = 'Alex',
     this.businessDescription = '',
@@ -266,6 +273,8 @@ class AgentSettings {
   AgentSettings copyWith({
     Object? id = _keep,
     String? status,
+    Object? telnyxAssistantId = _keep,
+    Object? telnyxTexmlAppId = _keep,
     String? businessName,
     String? agentName,
     String? businessDescription,
@@ -315,6 +324,12 @@ class AgentSettings {
     return AgentSettings(
       id: identical(id, _keep) ? this.id : id as String?,
       status: status ?? this.status,
+      telnyxAssistantId: identical(telnyxAssistantId, _keep)
+          ? this.telnyxAssistantId
+          : telnyxAssistantId as String?,
+      telnyxTexmlAppId: identical(telnyxTexmlAppId, _keep)
+          ? this.telnyxTexmlAppId
+          : telnyxTexmlAppId as String?,
       businessName: businessName ?? this.businessName,
       agentName: agentName ?? this.agentName,
       businessDescription: businessDescription ?? this.businessDescription,
@@ -401,6 +416,8 @@ class AgentSettings {
     return AgentSettings(
       id: json['id'] as String?,
       status: json['status'] as String? ?? 'draft',
+      telnyxAssistantId: json['telnyx_assistant_id'] as String?,
+      telnyxTexmlAppId: json['telnyx_texml_app_id'] as String?,
       businessName: json['business_name'] as String? ?? '',
       agentName: json['agent_name'] as String? ?? 'Alex',
       businessDescription: json['business_description'] as String? ?? '',
@@ -470,6 +487,8 @@ class AgentSettings {
   Map<String, dynamic> toJson() => {
         if (id != null) 'id': id,
         'status': status,
+        if (telnyxAssistantId != null) 'telnyx_assistant_id': telnyxAssistantId,
+        if (telnyxTexmlAppId != null) 'telnyx_texml_app_id': telnyxTexmlAppId,
         'business_name': businessName,
         'agent_name': agentName,
         'business_description': businessDescription,
@@ -553,7 +572,8 @@ class AgentListNotifier extends AsyncNotifier<List<AgentSettings>> {
         .toList();
   }
 
-  Future<void> saveAgent(AgentSettings settings) async {
+  /// Saves agent settings to Supabase. Returns the row ID.
+  Future<String> saveAgent(AgentSettings settings) async {
     final companyId = await ref.read(_companyIdProvider.future);
     final supabase = Supabase.instance.client;
 
@@ -562,29 +582,114 @@ class AgentListNotifier extends AsyncNotifier<List<AgentSettings>> {
     debugPrint('[SaveAgent] company_id: $companyId, agent id: ${settings.id}');
     debugPrint('[SaveAgent] payload keys: ${payload.keys.toList()}');
 
+    String savedId;
+
     if (settings.id != null) {
-      // Update existing
       debugPrint('[SaveAgent] Updating existing agent ${settings.id}');
       await supabase
           .from('agent_settings')
           .update(payload)
           .eq('id', settings.id!);
+      savedId = settings.id!;
       debugPrint('[SaveAgent] Update complete');
     } else {
-      // Insert new
       debugPrint('[SaveAgent] Inserting new agent');
-      await supabase.from('agent_settings').insert(payload);
-      debugPrint('[SaveAgent] Insert complete');
+      final row = await supabase
+          .from('agent_settings')
+          .insert(payload)
+          .select('id')
+          .single();
+      savedId = row['id'] as String;
+      debugPrint('[SaveAgent] Insert complete, id: $savedId');
     }
 
-    // Refresh list
+    ref.invalidateSelf();
+    return savedId;
+  }
+
+  /// Push agent config to Telnyx via Edge Function.
+  Future<void> pushToTelnyx(String agentSettingsId) async {
+    final supabase = Supabase.instance.client;
+    // Refresh session to avoid expired JWT (401)
+    await supabase.auth.refreshSession();
+    debugPrint('[TelnyxSync] Invoking telnyx-push-agent with agent_id: $agentSettingsId');
+    final res = await supabase.functions.invoke(
+      'telnyx-push-agent',
+      body: {'agent_id': agentSettingsId},
+    );
+    debugPrint('[TelnyxSync] Response status: ${res.status}');
+    debugPrint('[TelnyxSync] Response data: ${res.data}');
+    if (res.status != 200) {
+      throw Exception('Telnyx sync failed (status ${res.status}): ${res.data}');
+    }
+  }
+
+  /// Deactivate agent on Telnyx, then reset local status to draft.
+  Future<void> deactivateAgent(String agentSettingsId) async {
+    final supabase = Supabase.instance.client;
+
+    // Try to delete on Telnyx (non-fatal if edge function doesn't exist yet)
+    try {
+      debugPrint('[TelnyxSync] Invoking telnyx-delete-agent for $agentSettingsId');
+      final res = await supabase.functions.invoke(
+        'telnyx-delete-agent',
+        body: {'agent_id': agentSettingsId},
+      );
+      debugPrint('[TelnyxSync] Delete response: ${res.status}');
+    } catch (e) {
+      debugPrint('[TelnyxSync] Delete call failed (non-fatal): $e');
+    }
+
+    // Clear telnyx_assistant_id and set status to draft
+    await supabase
+        .from('agent_settings')
+        .update({'telnyx_assistant_id': null, 'status': 'draft'})
+        .eq('id', agentSettingsId);
+
     ref.invalidateSelf();
   }
 
   Future<void> deleteAgent(String agentId) async {
     final supabase = Supabase.instance.client;
+    // Clean up Telnyx side first
+    try {
+      await deactivateAgent(agentId);
+    } catch (_) {}
     await supabase.from('agent_settings').delete().eq('id', agentId);
     ref.invalidateSelf();
+  }
+
+  /// Assign a phone number to an agent's TeXML app on Telnyx.
+  Future<void> assignNumber(String phoneNumberId, String agentSettingsId) async {
+    final supabase = Supabase.instance.client;
+    final res = await supabase.functions.invoke(
+      'assign-number-to-agent',
+      body: {
+        'phone_number_id': phoneNumberId,
+        'agent_settings_id': agentSettingsId,
+        'action': 'assign',
+      },
+    );
+    debugPrint('[AssignNumber] Response: ${res.status} ${res.data}');
+    if (res.status != 200) {
+      throw Exception('Assign failed (${res.status}): ${res.data}');
+    }
+  }
+
+  /// Unassign a phone number from an agent, restoring the default SIP connection.
+  Future<void> unassignNumber(String phoneNumberId) async {
+    final supabase = Supabase.instance.client;
+    final res = await supabase.functions.invoke(
+      'assign-number-to-agent',
+      body: {
+        'phone_number_id': phoneNumberId,
+        'action': 'unassign',
+      },
+    );
+    debugPrint('[UnassignNumber] Response: ${res.status} ${res.data}');
+    if (res.status != 200) {
+      throw Exception('Unassign failed (${res.status}): ${res.data}');
+    }
   }
 }
 
@@ -676,6 +781,7 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
   AgentSettings? _draft;
   bool _isDirty = false;
   bool _isSaving = false;
+  bool _isDeploying = false;
 
   /// The id of the agent currently being edited (null = new unsaved agent).
   String? _editingAgentId;
@@ -710,64 +816,141 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
 
     setState(() => _isSaving = true);
     try {
-      // 1. Save settings to Supabase
-      await ref.read(agentListProvider.notifier).saveAgent(_draft!);
-
-      // 2. Try to push to Telnyx via Edge Function (non-blocking)
-      String? telnyxWarning;
-      try {
-        final supabase = Supabase.instance.client;
-        final companyId = await ref.read(_companyIdProvider.future);
-        debugPrint('[TelnyxSync] Invoking telnyx-push-agent with company_id: $companyId');
-        final res = await supabase.functions.invoke(
-          'telnyx-push-agent',
-          body: {'company_id': companyId},
-        );
-        debugPrint('[TelnyxSync] Response status: ${res.status}');
-        debugPrint('[TelnyxSync] Response data: ${res.data}');
-        if (res.status != 200) {
-          telnyxWarning = 'Telnyx sync failed (status ${res.status})';
-          debugPrint('[TelnyxSync] WARNING: $telnyxWarning');
-        }
-      } catch (e, st) {
-        telnyxWarning = 'Telnyx sync unavailable';
-        debugPrint('[TelnyxSync] ERROR: $e');
-        debugPrint('[TelnyxSync] Stack trace: $st');
-      }
+      final savedId = await ref.read(agentListProvider.notifier).saveAgent(_draft!);
 
       if (mounted) {
         setState(() {
+          _editingAgentId = savedId;
+          _draft = _draft!.copyWith(id: savedId);
           _isDirty = false;
           _isSaving = false;
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-                telnyxWarning != null
-                    ? 'Settings saved. $telnyxWarning'
-                    : 'Settings saved & synced to Telnyx',
-                style: _T.body(color: Colors.white)),
-            backgroundColor: telnyxWarning != null ? _T.amber : _T.green,
+            content: Text('Settings saved', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.green,
             behavior: SnackBarBehavior.floating,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           ),
         );
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isSaving = false);
-        showDialog(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: Text('Save failed', style: _T.label(size: 16)),
-            content: Text(e.toString(), style: _T.body()),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('OK'),
-              ),
-            ],
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Save failed: $e', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _deployToTelnyx() async {
+    if (_draft == null) return;
+
+    setState(() => _isDeploying = true);
+    try {
+      // Save first if dirty
+      String agentId;
+      if (_isDirty || _editingAgentId == null) {
+        agentId = await ref.read(agentListProvider.notifier).saveAgent(_draft!);
+        if (mounted) {
+          setState(() {
+            _editingAgentId = agentId;
+            _draft = _draft!.copyWith(id: agentId);
+            _isDirty = false;
+          });
+        }
+      } else {
+        agentId = _editingAgentId!;
+      }
+
+      await ref.read(agentListProvider.notifier).pushToTelnyx(agentId);
+
+      if (mounted) {
+        setState(() => _isDeploying = false);
+        // Refresh to pick up telnyx_assistant_id
+        ref.invalidate(agentListProvider);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Deployed to Telnyx', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.green,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isDeploying = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Deploy failed: $e', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _deactivateOnTelnyx() async {
+    if (_editingAgentId == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Deactivate agent?', style: _T.label(size: 16)),
+        content: Text(
+          'This will remove the agent from Telnyx. It will no longer handle calls.',
+          style: _T.body(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(foregroundColor: _T.red),
+            child: const Text('Deactivate'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _isDeploying = true);
+    try {
+      await ref.read(agentListProvider.notifier).deactivateAgent(_editingAgentId!);
+      if (mounted) {
+        setState(() {
+          _isDeploying = false;
+          _draft = _draft?.copyWith(telnyxAssistantId: null, status: 'draft');
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Agent deactivated', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.amber,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isDeploying = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Deactivation failed: $e', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           ),
         );
       }
@@ -821,17 +1004,32 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
                 children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(28, 28, 28, 0),
-                    child: Column(
+                    child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('AI Agents',
-                            style: _T.label(
-                                size: 22,
-                                weight: FontWeight.w700,
-                                color: _T.brand)),
-                        const SizedBox(height: 4),
-                        Text('Configure your AI receptionist',
-                            style: _T.body(color: _T.sub)),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('AI Agents',
+                                  style: _T.label(
+                                      size: 22,
+                                      weight: FontWeight.w700,
+                                      color: _T.brand)),
+                              const SizedBox(height: 4),
+                              Text('Configure your AI receptionist',
+                                  style: _T.body(color: _T.sub)),
+                            ],
+                          ),
+                        ),
+                        if (_editingAgentId != null)
+                          _DeployButton(
+                            isDeployed: s.isDeployed,
+                            isDeploying: _isDeploying,
+                            isDirty: _isDirty,
+                            onDeploy: _deployToTelnyx,
+                            onDeactivate: _deactivateOnTelnyx,
+                          ),
                       ],
                     ),
                   ),
@@ -855,6 +1053,7 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
                             (2, 'Routing & Escalation'),
                             (3, 'Keywords'),
                             (4, 'Behaviour'),
+                            (5, 'Phone Numbers'),
                           ])
                           Padding(
                             padding: const EdgeInsets.only(right: 6),
@@ -902,6 +1101,7 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
                         _RoutingEscalationTab(settings: s, onPatch: _patch),
                         _KeywordsTab(settings: s, onPatch: _patch),
                         _BehaviourTab(settings: s, onPatch: _patch),
+                        _PhoneNumbersTab(agentSettings: s),
                       ],
                     ),
                   ),
@@ -2684,6 +2884,422 @@ class _PillButton extends StatelessWidget {
         side: const BorderSide(color: _T.accent),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+    );
+  }
+}
+
+// ── Tab 6: Phone Numbers ──────────────────────────────────────────────────────
+
+class _PhoneNumbersTab extends ConsumerStatefulWidget {
+  final AgentSettings agentSettings;
+
+  const _PhoneNumbersTab({required this.agentSettings});
+
+  @override
+  ConsumerState<_PhoneNumbersTab> createState() => _PhoneNumbersTabState();
+}
+
+class _PhoneNumbersTabState extends ConsumerState<_PhoneNumbersTab> {
+  List<Map<String, dynamic>> _numbers = [];
+  bool _loading = true;
+  bool _assigning = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadNumbers();
+  }
+
+  @override
+  void didUpdateWidget(_PhoneNumbersTab old) {
+    super.didUpdateWidget(old);
+    if (old.agentSettings.id != widget.agentSettings.id) _loadNumbers();
+  }
+
+  Future<void> _loadNumbers() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final companyId = await ref.read(_companyIdProvider.future);
+      final supabase = Supabase.instance.client;
+      final rows = await supabase
+          .from('phone_numbers')
+          .select('id, number, telnyx_number_id, status, assigned_agent_id')
+          .eq('company_id', companyId)
+          .eq('status', 'active')
+          .order('number');
+      if (mounted) setState(() { _numbers = List<Map<String, dynamic>>.from(rows); _loading = false; });
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
+  Future<void> _assign(Map<String, dynamic> number) async {
+    final agentId = widget.agentSettings.id;
+    if (agentId == null || !widget.agentSettings.isDeployed) return;
+
+    final telnyxNumberId = number['telnyx_number_id'] as String?;
+    if (telnyxNumberId == null) return;
+
+    setState(() => _assigning = true);
+    try {
+      await ref.read(agentListProvider.notifier).assignNumber(telnyxNumberId, agentId);
+      await _loadNumbers();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${number['number']} assigned to agent', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.green,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Assign failed: $e', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _assigning = false);
+    }
+  }
+
+  Future<void> _unassign(Map<String, dynamic> number) async {
+    final telnyxNumberId = number['telnyx_number_id'] as String?;
+    if (telnyxNumberId == null) return;
+
+    setState(() => _assigning = true);
+    try {
+      await ref.read(agentListProvider.notifier).unassignNumber(telnyxNumberId);
+      await _loadNumbers();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${number['number']} unassigned', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.amber,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Unassign failed: $e', style: _T.body(color: Colors.white)),
+            backgroundColor: _T.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _assigning = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final agentId = widget.agentSettings.id;
+
+    if (!widget.agentSettings.isDeployed) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cloud_off, size: 48, color: _T.muted),
+              const SizedBox(height: 16),
+              Text('Deploy the agent first',
+                  style: _T.label(size: 16, weight: FontWeight.w600, color: _T.sub)),
+              const SizedBox(height: 8),
+              Text(
+                'You need to deploy this agent to Telnyx before you can assign phone numbers.',
+                style: _T.body(color: _T.muted),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_loading) return const Center(child: CircularProgressIndicator());
+
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline, color: _T.red, size: 40),
+              const SizedBox(height: 12),
+              Text(_error!, style: _T.body(color: _T.sub)),
+              const SizedBox(height: 12),
+              OutlinedButton(onPressed: _loadNumbers, child: const Text('Retry')),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Split numbers into assigned-to-this-agent, assigned-to-other, and available
+    final assignedToThis = _numbers.where((n) => n['assigned_agent_id'] == agentId).toList();
+    final assignedToOther = _numbers.where((n) =>
+        n['assigned_agent_id'] != null && n['assigned_agent_id'] != agentId).toList();
+    final available = _numbers.where((n) => n['assigned_agent_id'] == null).toList();
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _InfoTip(
+            text: 'Assign phone numbers to this agent. Inbound calls to assigned numbers will be handled by the AI agent.',
+          ),
+          const SizedBox(height: 20),
+
+          // Assigned to this agent
+          _SectionCard(
+            title: 'Assigned to this Agent (${assignedToThis.length})',
+            children: [
+              if (assignedToThis.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text('No numbers assigned yet.', style: _T.body(color: _T.muted)),
+                ),
+              ...assignedToThis.map((n) => _NumberRow(
+                number: n['number'] as String? ?? '',
+                status: 'assigned',
+                trailing: OutlinedButton(
+                  onPressed: _assigning ? null : () => _unassign(n),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _T.red,
+                    side: const BorderSide(color: _T.red),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  ),
+                  child: Text('Unassign', style: _T.label(size: 11, color: _T.red)),
+                ),
+              )),
+            ],
+          ),
+          const SizedBox(height: 20),
+
+          // Available numbers
+          _SectionCard(
+            title: 'Available Numbers (${available.length})',
+            children: [
+              if (available.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    'No available numbers. Purchase numbers from the Phone Numbers page.',
+                    style: _T.body(color: _T.muted),
+                  ),
+                ),
+              ...available.map((n) => _NumberRow(
+                number: n['number'] as String? ?? '',
+                status: 'available',
+                trailing: ElevatedButton(
+                  onPressed: _assigning ? null : () => _assign(n),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _T.accent,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    elevation: 0,
+                  ),
+                  child: Text('Assign', style: _T.label(size: 11, color: Colors.white)),
+                ),
+              )),
+            ],
+          ),
+
+          if (assignedToOther.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            _SectionCard(
+              title: 'Assigned to Other Agents (${assignedToOther.length})',
+              children: assignedToOther.map((n) => _NumberRow(
+                number: n['number'] as String? ?? '',
+                status: 'other',
+                trailing: Text('In use', style: _T.label(size: 11, color: _T.muted)),
+              )).toList(),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _NumberRow extends StatelessWidget {
+  final String number;
+  final String status; // 'assigned', 'available', 'other'
+  final Widget trailing;
+
+  const _NumberRow({
+    required this.number,
+    required this.status,
+    required this.trailing,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: status == 'assigned'
+                  ? _T.green.withValues(alpha: 0.1)
+                  : status == 'available'
+                      ? _T.accentLight
+                      : _T.inputFill,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              Icons.phone,
+              size: 16,
+              color: status == 'assigned'
+                  ? _T.green
+                  : status == 'available'
+                      ? _T.accent
+                      : _T.muted,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(number, style: _T.body(size: 13)),
+          ),
+          trailing,
+        ],
+      ),
+    );
+  }
+}
+
+class _DeployButton extends StatelessWidget {
+  final bool isDeployed;
+  final bool isDeploying;
+  final bool isDirty;
+  final VoidCallback onDeploy;
+  final VoidCallback onDeactivate;
+
+  const _DeployButton({
+    required this.isDeployed,
+    required this.isDeploying,
+    required this.isDirty,
+    required this.onDeploy,
+    required this.onDeactivate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (isDeploying) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: _T.accentLight,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: _T.accent),
+            ),
+            const SizedBox(width: 8),
+            Text('Deploying...', style: _T.label(size: 12, color: _T.accent)),
+          ],
+        ),
+      );
+    }
+
+    if (isDeployed) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: _T.green.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: const BoxDecoration(
+                    color: _T.green,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text('Live on Telnyx',
+                    style: _T.label(size: 11, color: _T.green)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton(
+            onPressed: onDeploy,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _T.accent,
+              side: const BorderSide(color: _T.accent),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            ),
+            child: Text(isDirty ? 'Save & sync' : 'Re-sync',
+                style: _T.label(size: 11, color: _T.accent)),
+          ),
+          const SizedBox(width: 6),
+          OutlinedButton(
+            onPressed: onDeactivate,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _T.red,
+              side: const BorderSide(color: _T.red),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            ),
+            child: Text('Deactivate',
+                style: _T.label(size: 11, color: _T.red)),
+          ),
+        ],
+      );
+    }
+
+    // Not deployed
+    return ElevatedButton.icon(
+      onPressed: onDeploy,
+      icon: const Icon(Icons.rocket_launch, size: 16),
+      label: Text(isDirty ? 'Save & deploy' : 'Deploy to Telnyx',
+          style: _T.label(size: 12, weight: FontWeight.w600, color: Colors.white)),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: _T.accent,
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        elevation: 0,
       ),
     );
   }

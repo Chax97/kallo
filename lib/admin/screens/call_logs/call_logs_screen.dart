@@ -1,6 +1,5 @@
-import 'csv_download_stub.dart'
-    if (dart.library.html) 'csv_download_web.dart'
-    if (dart.library.io) 'csv_download_io.dart';
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -218,7 +217,12 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
     ];
 
     final csv = rows.join('\n');
-    downloadCsvFile(csv, 'call_history.csv');
+    final blob = html.Blob([csv], 'text/csv');
+    final url = html.Url.createObjectUrlFromBlob(blob);
+    html.AnchorElement(href: url)
+      ..setAttribute('download', 'call_history.csv')
+      ..click();
+    html.Url.revokeObjectUrl(url);
   }
 
   void _reset() {
