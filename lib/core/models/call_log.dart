@@ -12,6 +12,7 @@ class CallLog {
   final int? durationSeconds;
   final String? recordingUrl;
   final String? storagePath;
+  final String? answeredBy;
 
   const CallLog({
     required this.id,
@@ -27,6 +28,7 @@ class CallLog {
     this.durationSeconds,
     this.recordingUrl,
     this.storagePath,
+    this.answeredBy,
   });
 
   factory CallLog.fromJson(Map<String, dynamic> json) => CallLog(
@@ -52,6 +54,7 @@ class CallLog {
         durationSeconds: json['duration_seconds'] as int?,
         recordingUrl: json['recording_url'] as String?,
         storagePath: json['storage_path'] as String?,
+        answeredBy: json['answered_by'] as String?,
       );
 
   /// The "other party" number to show in the UI.

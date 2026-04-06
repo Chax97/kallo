@@ -1,4 +1,5 @@
 // ignore: avoid_web_libraries_in_flutter
+import 'dart:async';
 import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -101,6 +102,77 @@ final _toNumbersProvider = FutureProvider<List<String>>((ref) async {
   return all;
 });
 
+class _InsightIndex {
+  final Set<String> callIds;       // matched by call_id
+  final Set<String> callerNumbers; // fallback for older rows without call_id
+  const _InsightIndex({required this.callIds, required this.callerNumbers});
+  bool matches(CallLog log) =>
+      callIds.contains(log.id) || callerNumbers.contains(log.fromNumber);
+}
+
+// Builds an index of which calls have insights, matching by call_id or caller_number
+final _insightIndexProvider =
+    FutureProvider.family<_InsightIndex, _CallLogFilter>((ref, filter) async {
+  final response = await Supabase.instance.client
+      .from('call_insights')
+      .select('call_id, caller_number');
+  final rows = response as List;
+  final callIds = <String>{};
+  final callerNumbers = <String>{};
+  for (final r in rows) {
+    if (r['call_id'] != null) callIds.add(r['call_id'] as String);
+    if (r['caller_number'] != null) callerNumbers.add(r['caller_number'] as String);
+  }
+  debugPrint('[CallLogs] insightIndex callIds: $callIds callerNumbers: $callerNumbers');
+  return _InsightIndex(callIds: callIds, callerNumbers: callerNumbers);
+});
+
+// Returns all insights for a specific call ID
+final _callInsightsProvider =
+    FutureProvider.family<List<Map<String, dynamic>>, String>((ref, callId) async {
+  final response = await Supabase.instance.client
+      .from('call_insights')
+      .select('insight_name, result, created_at')
+      .eq('call_id', callId);
+  return (response as List).cast<Map<String, dynamic>>();
+});
+
+// Fetches the recording via authenticated XHR and returns a local blob URL.
+// Using XHR responseType='blob' lets the browser handle decoding natively,
+// avoiding Dart<->JS byte conversion issues.
+final _recordingBlobUrlProvider =
+    FutureProvider.family<String?, String>((ref, storagePath) async {
+  try {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null) return null;
+    final storageUrl = Supabase.instance.client.storage.url;
+    final url = '$storageUrl/object/call_recordings/$storagePath';
+    final completer = Completer<String?>();
+    final xhr = html.HttpRequest();
+    xhr.open('GET', url);
+    xhr.responseType = 'blob';
+    xhr.setRequestHeader('Authorization', 'Bearer $token');
+    xhr.onLoad.listen((_) {
+      if (xhr.status == 200) {
+        final blob = xhr.response as html.Blob;
+        completer.complete(html.Url.createObjectUrlFromBlob(blob));
+      } else {
+        debugPrint('[Recording] XHR status: ${xhr.status}');
+        completer.complete(null);
+      }
+    });
+    xhr.onError.listen((_) {
+      debugPrint('[Recording] XHR error for: $url');
+      completer.complete(null);
+    });
+    xhr.send();
+    return completer.future;
+  } catch (e) {
+    debugPrint('[Recording] blob url error: $e');
+    return null;
+  }
+});
+
 final _callLogsProvider =
     FutureProvider.family<List<CallLog>, _CallLogFilter>((ref, filter) async {
   final fromStr = '${filter.fromDate.toIso8601String().substring(0, 10)}T${filter.fromTime}:00';
@@ -178,6 +250,7 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
   bool _stereo = false;
 
   bool _hasSearched = false;
+  CallLog? _selectedLog;
 
   _CallLogFilter get _currentFilter => _CallLogFilter(
         fromDate: _fromDate,
@@ -244,6 +317,40 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        _buildMain(),
+        // Backdrop
+        if (_selectedLog != null)
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => setState(() => _selectedLog = null),
+              child: Container(color: Colors.black.withValues(alpha: 0.25)),
+            ),
+          ),
+        // Slide-out drawer
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOut,
+          right: _selectedLog != null ? 0 : -520,
+          top: 0,
+          bottom: 0,
+          width: 500,
+          child: Material(
+            elevation: 16,
+            child: _selectedLog != null
+                ? _CallInsightDrawer(
+                    log: _selectedLog!,
+                    onClose: () => setState(() => _selectedLog = null),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMain() {
     return Padding(
       padding: const EdgeInsets.all(28),
       child: Column(
@@ -329,7 +436,11 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
                                 ),
                               ),
                               const Divider(height: 1),
-                              Expanded(child: _ResultsBody(filter: _currentFilter, hasSearched: _hasSearched)),
+                              Expanded(child: _ResultsBody(
+                        filter: _currentFilter,
+                        hasSearched: _hasSearched,
+                        onSelectLog: (log) => setState(() => _selectedLog = log),
+                      )),
                             ],
                           ),
                         ),
@@ -510,7 +621,12 @@ class _CallLogsScreenState extends ConsumerState<CallLogsScreen> {
 class _ResultsBody extends ConsumerWidget {
   final _CallLogFilter filter;
   final bool hasSearched;
-  const _ResultsBody({required this.filter, required this.hasSearched});
+  final ValueChanged<CallLog> onSelectLog;
+  const _ResultsBody({
+    required this.filter,
+    required this.hasSearched,
+    required this.onSelectLog,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -535,10 +651,15 @@ class _ResultsBody extends ConsumerWidget {
                 style: TextStyle(fontFamily: 'DM Sans', fontSize: 13, color: Color(0xFF9999AA))),
           );
         }
+        final insightIndex = ref.watch(_insightIndexProvider(filter)).asData?.value;
         return ListView.separated(
           itemCount: data.length,
           separatorBuilder: (_, _) => const Divider(height: 1),
-          itemBuilder: (context, i) => _CallLogRow(log: data[i]),
+          itemBuilder: (context, i) => _CallLogRow(
+            log: data[i],
+            hasInsights: insightIndex?.matches(data[i]) ?? false,
+            onOpenInsights: () => onSelectLog(data[i]),
+          ),
         );
       },
     );
@@ -547,7 +668,13 @@ class _ResultsBody extends ConsumerWidget {
 
 class _CallLogRow extends StatelessWidget {
   final CallLog log;
-  const _CallLogRow({required this.log});
+  final bool hasInsights;
+  final VoidCallback onOpenInsights;
+  const _CallLogRow({
+    required this.log,
+    required this.hasInsights,
+    required this.onOpenInsights,
+  });
 
   String _formatDuration(int? seconds) {
     if (seconds == null || seconds == 0) return '0 min 0 secs';
@@ -564,6 +691,15 @@ class _CallLogRow extends StatelessWidget {
         '${dt.second.toString().padLeft(2, '0')}';
   }
 
+  String _formatAnsweredBy(String? v) {
+    switch (v) {
+      case 'ai_assistant': return 'AI Assistant';
+      case 'app': return 'Human';
+      case 'voicemail': return 'Voicemail';
+      default: return v ?? '—';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isInbound = log.direction == 'inbound';
@@ -574,13 +710,15 @@ class _CallLogRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       child: Row(
         children: [
-          SizedBox(
-            width: 32,
-            child: Icon(dirIcon, size: 18, color: dirColor),
-          ),
+          SizedBox(width: 32, child: Icon(dirIcon, size: 18, color: dirColor)),
           Expanded(flex: 3, child: _NumberText(log.fromNumber ?? '—')),
           Expanded(flex: 3, child: _NumberText(log.toNumber ?? '—')),
-          Expanded(flex: 3, child: _NumberText(log.toNumber ?? '—')),
+          Expanded(
+            flex: 3,
+            child: Text(_formatAnsweredBy(log.answeredBy),
+                style: const TextStyle(fontFamily: 'DM Sans', fontSize: 13,
+                    color: Color(0xFF3D3D5C))),
+          ),
           Expanded(
             flex: 3,
             child: Text(_formatDateTime(log.startedAt),
@@ -593,9 +731,450 @@ class _CallLogRow extends StatelessWidget {
                 style: const TextStyle(fontFamily: 'DM Sans', fontSize: 12,
                     color: Color(0xFF4F6AFF))),
           ),
-          const SizedBox(width: 80),
+          SizedBox(
+            width: 80,
+            child: hasInsights
+                ? Tooltip(
+                    message: 'View AI Insights',
+                    child: InkWell(
+                      onTap: onOpenInsights,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEEF2FF),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.auto_awesome, size: 13, color: Color(0xFF6366F1)),
+                            SizedBox(width: 4),
+                            Text('AI', style: TextStyle(fontFamily: 'DM Sans', fontSize: 11,
+                                fontWeight: FontWeight.w700, color: Color(0xFF6366F1))),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
         ],
       ),
+    );
+  }
+}
+
+// ── Call Insight Drawer ───────────────────────────────────────────────────────
+
+class _CallInsightDrawer extends ConsumerWidget {
+  final CallLog log;
+  final VoidCallback onClose;
+  const _CallInsightDrawer({required this.log, required this.onClose});
+
+  static String _extractText(dynamic result) {
+    if (result is Map) return result['text'] as String? ?? '';
+    return result?.toString() ?? '';
+  }
+
+  static String _fmtDate(DateTime? dt) {
+    if (dt == null) return '—';
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '${dt.day} ${months[dt.month - 1]} ${dt.year},  $h:$m';
+  }
+
+  static String _fmtDur(int? s) {
+    if (s == null || s == 0) return '0s';
+    final m = s ~/ 60;
+    final sec = s % 60;
+    return m > 0 ? '${m}m ${sec}s' : '${sec}s';
+  }
+
+  static String _fmtAnsweredBy(String? v) {
+    switch (v) {
+      case 'ai_assistant': return 'AI Assistant';
+      case 'app': return 'Human';
+      case 'voicemail': return 'Voicemail';
+      default: return v ?? '—';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final insightsAsync = ref.watch(_callInsightsProvider(log.id));
+
+    final String? recordingUrl = log.storagePath != null
+        ? ref.watch(_recordingBlobUrlProvider(log.storagePath!)).asData?.value
+        : null;
+
+    final metadata = [
+      ('Caller',       log.fromNumber ?? '—'),
+      ('Called',       log.toNumber ?? '—'),
+      ('Date',         _fmtDate(log.startedAt)),
+      ('Duration',     _fmtDur(log.durationSeconds)),
+      ('Status',       log.state ?? '—'),
+      ('Answered By',  _fmtAnsweredBy(log.answeredBy)),
+    ];
+
+    return Container(
+      color: Colors.white,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            decoration: const BoxDecoration(
+              color: Color(0xFFF8F8FC),
+              border: Border(bottom: BorderSide(color: Color(0xFFE8E8F0))),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.call_outlined, size: 16, color: Color(0xFF4F6AFF)),
+                const SizedBox(width: 10),
+                const Text('Call Details',
+                    style: TextStyle(fontFamily: 'DM Sans', fontSize: 15,
+                        fontWeight: FontWeight.w600, color: Color(0xFF0D0D1A))),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: onClose,
+                  color: const Color(0xFF9999AA),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+              ],
+            ),
+          ),
+
+          // Scrollable content
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Metadata
+                  _DrawerSection(
+                    title: 'Call Metadata',
+                    child: Column(
+                      children: metadata.map((r) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 5),
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: 100,
+                              child: Text(r.$1,
+                                  style: const TextStyle(fontFamily: 'DM Sans', fontSize: 12,
+                                      fontWeight: FontWeight.w600, color: Color(0xFF6B6B8A))),
+                            ),
+                            Expanded(
+                              child: Text(r.$2,
+                                  style: const TextStyle(fontFamily: 'DM Sans', fontSize: 13,
+                                      color: Color(0xFF0D0D1A))),
+                            ),
+                          ],
+                        ),
+                      )).toList(),
+                    ),
+                  ),
+
+                  // Recording player
+                  if (recordingUrl != null) ...[
+                    const SizedBox(height: 20),
+                    _DrawerSection(
+                      title: 'Recording',
+                      titleIcon: Icons.graphic_eq,
+                      child: _RecordingPlayer(url: recordingUrl),
+                    ),
+                  ],
+
+                  // AI insights
+                  insightsAsync.when(
+                    loading: () => const Padding(
+                      padding: EdgeInsets.only(top: 24),
+                      child: Center(child: CircularProgressIndicator()),
+                    ),
+                    error: (e, _) => Padding(
+                      padding: const EdgeInsets.only(top: 16),
+                      child: Text('Error loading insights: $e',
+                          style: const TextStyle(color: Color(0xFFEF4444))),
+                    ),
+                    data: (insights) {
+                      final summary = insights
+                          .where((i) => i['insight_name'] == 'Call Summary')
+                          .firstOrNull;
+                      final transcript = insights
+                          .where((i) => i['insight_name'] == 'Transcript')
+                          .firstOrNull;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (summary != null) ...[
+                            const SizedBox(height: 20),
+                            _DrawerSection(
+                              title: 'AI Summary',
+                              titleIcon: Icons.auto_awesome,
+                              titleIconColor: const Color(0xFF6366F1),
+                              child: Text(
+                                _extractText(summary['result']),
+                                style: const TextStyle(fontFamily: 'DM Sans', fontSize: 13,
+                                    height: 1.6, color: Color(0xFF3D3D5C)),
+                              ),
+                            ),
+                          ],
+                          if (transcript != null) ...[
+                            const SizedBox(height: 20),
+                            _DrawerSection(
+                              title: 'Transcript',
+                              titleIcon: Icons.chat_bubble_outline,
+                              titleIconColor: const Color(0xFF4F6AFF),
+                              child: _TranscriptView(
+                                  text: _extractText(transcript['result'])),
+                            ),
+                          ],
+                        ],
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DrawerSection extends StatelessWidget {
+  final String title;
+  final IconData? titleIcon;
+  final Color? titleIconColor;
+  final Widget child;
+  const _DrawerSection({
+    required this.title,
+    required this.child,
+    this.titleIcon,
+    this.titleIconColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            if (titleIcon != null) ...[
+              Icon(titleIcon, size: 13, color: titleIconColor ?? const Color(0xFF9999AA)),
+              const SizedBox(width: 6),
+            ],
+            Text(title.toUpperCase(),
+                style: const TextStyle(fontFamily: 'DM Sans', fontSize: 10,
+                    fontWeight: FontWeight.w700, color: Color(0xFF9999AA), letterSpacing: 0.5)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8F8FC),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFE8E8F0)),
+          ),
+          child: child,
+        ),
+      ],
+    );
+  }
+}
+
+class _TranscriptView extends StatelessWidget {
+  final String text;
+  const _TranscriptView({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = text.split('\n').where((l) => l.trim().isNotEmpty).toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: lines.map((line) {
+        final isAgent = line.startsWith('Agent:');
+        final content = line
+            .replaceFirst('Agent: ', '')
+            .replaceFirst('Caller: ', '');
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 46,
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isAgent
+                      ? const Color(0xFFEEF2FF)
+                      : const Color(0xFFF0FDF4),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  isAgent ? 'Agent' : 'Caller',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontFamily: 'DM Sans', fontSize: 10, fontWeight: FontWeight.w700,
+                    color: isAgent ? const Color(0xFF6366F1) : const Color(0xFF22C55E),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(content,
+                    style: const TextStyle(fontFamily: 'DM Sans', fontSize: 12,
+                        height: 1.5, color: Color(0xFF3D3D5C))),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
+// ── Recording Player ──────────────────────────────────────────────────────────
+
+class _RecordingPlayer extends StatefulWidget {
+  final String url;
+  const _RecordingPlayer({required this.url});
+
+  @override
+  State<_RecordingPlayer> createState() => _RecordingPlayerState();
+}
+
+class _RecordingPlayerState extends State<_RecordingPlayer> {
+  late final html.AudioElement _audio;
+  bool _playing = false;
+  double _position = 0;
+  double _duration = 0;
+  bool _error = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _audio = html.AudioElement(widget.url);
+    _audio.onLoadedMetadata.listen((_) {
+      if (mounted) setState(() { _duration = _audio.duration.toDouble(); _error = false; });
+    });
+    _audio.onTimeUpdate.listen((_) {
+      if (mounted) setState(() => _position = _audio.currentTime.toDouble());
+    });
+    _audio.onEnded.listen((_) {
+      if (mounted) setState(() { _playing = false; _position = 0; });
+    });
+    _audio.onError.listen((_) {
+      debugPrint('[RecordingPlayer] error loading url: ${widget.url}');
+      debugPrint('[RecordingPlayer] error code: ${_audio.error?.code} message: ${_audio.error?.message}');
+      if (mounted) setState(() { _error = true; _playing = false; });
+    });
+  }
+
+  @override
+  void dispose() {
+    _audio.pause();
+    super.dispose();
+  }
+
+  String _fmt(double secs) {
+    final d = Duration(seconds: secs.round());
+    final m = d.inMinutes;
+    final s = d.inSeconds % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error) {
+      return Row(
+        children: [
+          const Icon(Icons.error_outline, size: 16, color: Color(0xFF9999AA)),
+          const SizedBox(width: 8),
+          const Text('Unable to load recording.',
+              style: TextStyle(fontFamily: 'DM Sans', fontSize: 12, color: Color(0xFF9999AA))),
+          const SizedBox(width: 8),
+          TextButton(
+            onPressed: () => html.window.open(widget.url, '_blank'),
+            child: const Text('Open in browser',
+                style: TextStyle(fontFamily: 'DM Sans', fontSize: 12)),
+          ),
+        ],
+      );
+    }
+    final progress = _duration > 0 ? (_position / _duration).clamp(0.0, 1.0) : 0.0;
+    return Row(
+      children: [
+        IconButton(
+          icon: Icon(_playing ? Icons.pause_circle : Icons.play_circle_filled),
+          color: const Color(0xFF4F6AFF),
+          iconSize: 38,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          onPressed: () {
+            if (_playing) {
+              _audio.pause();
+              setState(() => _playing = false);
+            } else {
+              _audio.play();
+              setState(() => _playing = true);
+            }
+          },
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SliderTheme(
+                data: SliderThemeData(
+                  trackHeight: 3,
+                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                  activeTrackColor: const Color(0xFF4F6AFF),
+                  inactiveTrackColor: const Color(0xFFE8E8F0),
+                  thumbColor: const Color(0xFF4F6AFF),
+                  overlayColor: const Color(0xFF4F6AFF).withValues(alpha: 0.15),
+                ),
+                child: Slider(
+                  value: progress,
+                  onChanged: _duration > 0
+                      ? (v) {
+                          _audio.currentTime = _duration * v;
+                          setState(() => _position = _duration * v);
+                        }
+                      : null,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(_fmt(_position),
+                        style: const TextStyle(fontFamily: 'DM Sans', fontSize: 11,
+                            color: Color(0xFF9999AA))),
+                    Text(_fmt(_duration),
+                        style: const TextStyle(fontFamily: 'DM Sans', fontSize: 11,
+                            color: Color(0xFF9999AA))),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
