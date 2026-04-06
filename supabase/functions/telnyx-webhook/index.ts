@@ -481,7 +481,15 @@ Deno.serve(async (req) => {
         try {
           console.log("Downloading recording:", recordingUrl, "stage=", cs?.stage)
           const audioRes = await fetch(recordingUrl)
+          if (!audioRes.ok) {
+            console.error(`[recording] download failed: ${audioRes.status} ${audioRes.statusText}`)
+            break
+          }
           const audioBlob = await audioRes.blob()
+          if (audioBlob.size < 1000) {
+            console.error(`[recording] file too small (${audioBlob.size} bytes), likely not audio`)
+            break
+          }
           const safeId = (callData.call_control_id ?? "unknown").replace(/[^a-zA-Z0-9\-_]/g, "_")
           const fileName = `${safeId}-${Date.now()}.mp3`
           const bucket = isVoicemail ? "voicemails" : "call_recordings"
@@ -578,8 +586,18 @@ Deno.serve(async (req) => {
       // Download and store the recording
       if (recordingUrl) {
         try {
-          const audioRes = await fetch(recordingUrl)
+          const audioRes = await fetch(recordingUrl, {
+            headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+          })
+          if (!audioRes.ok) {
+            console.error(`[recording] download failed: ${audioRes.status} ${audioRes.statusText}`)
+            break
+          }
           const audioBlob = await audioRes.blob()
+          if (audioBlob.size < 1000) {
+            console.error(`[recording] file too small (${audioBlob.size} bytes), likely not audio`)
+            break
+          }
           const safeId = (callData.call_control_id ?? "unknown").replace(/[^a-zA-Z0-9\-_]/g, "_")
           const fileName = `${safeId}-${Date.now()}.mp3`
 

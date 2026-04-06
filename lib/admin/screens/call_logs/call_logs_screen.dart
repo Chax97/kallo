@@ -1,5 +1,4 @@
 // ignore: avoid_web_libraries_in_flutter
-import 'dart:async';
 import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -137,38 +136,16 @@ final _callInsightsProvider =
   return (response as List).cast<Map<String, dynamic>>();
 });
 
-// Fetches the recording via authenticated XHR and returns a local blob URL.
-// Using XHR responseType='blob' lets the browser handle decoding natively,
-// avoiding Dart<->JS byte conversion issues.
 final _recordingBlobUrlProvider =
     FutureProvider.family<String?, String>((ref, storagePath) async {
   try {
-    final token = Supabase.instance.client.auth.currentSession?.accessToken;
-    if (token == null) return null;
-    final storageUrl = Supabase.instance.client.storage.url;
-    final url = '$storageUrl/object/call_recordings/$storagePath';
-    final completer = Completer<String?>();
-    final xhr = html.HttpRequest();
-    xhr.open('GET', url);
-    xhr.responseType = 'blob';
-    xhr.setRequestHeader('Authorization', 'Bearer $token');
-    xhr.onLoad.listen((_) {
-      if (xhr.status == 200) {
-        final blob = xhr.response as html.Blob;
-        completer.complete(html.Url.createObjectUrlFromBlob(blob));
-      } else {
-        debugPrint('[Recording] XHR status: ${xhr.status}');
-        completer.complete(null);
-      }
-    });
-    xhr.onError.listen((_) {
-      debugPrint('[Recording] XHR error for: $url');
-      completer.complete(null);
-    });
-    xhr.send();
-    return completer.future;
+    final url = await Supabase.instance.client.storage
+        .from('call_recordings')
+        .createSignedUrl(storagePath, 3600);
+    debugPrint('[Recording] signed URL: $url');
+    return url;
   } catch (e) {
-    debugPrint('[Recording] blob url error: $e');
+    debugPrint('[Recording] signed URL error: $e');
     return null;
   }
 });
