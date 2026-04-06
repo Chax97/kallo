@@ -657,13 +657,16 @@ Deno.serve(async (req) => {
       }
       console.log("[conversation_ended] messages count:", messages?.length ?? 0)
 
+      const endedAt = new Date().toISOString()
       const updateFields: Record<string, unknown> = {
         status: "completed",
         state: "completed",
-        ended_at: new Date().toISOString(),
+        ended_at: endedAt,
         answered_by: "ai_assistant",
       }
       if (durationSecs !== null) updateFields.duration_seconds = durationSecs
+      // Store the Telnyx conversation ID so the insight group webhook can link back to this call
+      if (callData._conversation_id) updateFields.call_session_id = callData._conversation_id
 
       await supabase
         .from("calls")

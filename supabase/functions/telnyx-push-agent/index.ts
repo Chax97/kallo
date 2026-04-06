@@ -7,6 +7,7 @@ const supabase = createClient(
 
 const TELNYX_API_KEY = Deno.env.get("TELNYX_API_KEY")
 const TELNYX_API_BASE = "https://api.telnyx.com/v2"
+const TELNYX_INSIGHT_GROUP_ID = Deno.env.get("TELNYX_INSIGHT_GROUP_ID")
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -212,6 +213,7 @@ Deno.serve(async (req) => {
     // Set webhook URL so AI assistant call events flow to our edge function
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!
     const webhookUrl = `${supabaseUrl}/functions/v1/telnyx-webhook`
+    const insightsWebhookUrl = `${supabaseUrl}/functions/v1/ai-call-insights`
 
     payload.telephony = {
       // status_callback_url ensures Telnyx sends call events even if the TeXML app PATCH below fails
@@ -224,6 +226,14 @@ Deno.serve(async (req) => {
 
     // Set the webhook at the assistant level (receives call.analyzed and other AI events)
     payload.webhook_url = webhookUrl
+    // Insights webhook receives post-call summaries & transcripts from Telnyx AI
+    payload.insights_webhook_url = insightsWebhookUrl
+    // Ensure the assistant stays linked to the insight group
+    if (TELNYX_INSIGHT_GROUP_ID ?? agent.telnyx_insight_group_id) {
+      payload.insight_settings = {
+        insight_group_id: TELNYX_INSIGHT_GROUP_ID ?? agent.telnyx_insight_group_id,
+      }
+    }
 
     let telnyxAssistantId: string = agent.telnyx_assistant_id
     let texmlAppId: string | null = agent.telnyx_texml_app_id ?? null
@@ -302,6 +312,78 @@ Deno.serve(async (req) => {
       }
     }
 
+    // ── Insight Group ─────────────────────────────────────────────────────────
+    // 1. Ensure a "Call Summary" insight template exists and is assigned to the group
+    // 2. Set the webhook URL on the insight group so Telnyx posts summaries to us
+    // (Assistant is linked to the group via insight_settings.insight_group_id in the PATCH above)
+    const insightGroupId = TELNYX_INSIGHT_GROUP_ID ?? (agent.telnyx_insight_group_id as string | null)
+    if (insightGroupId) {
+      try {
+        // Helper to create + assign an insight template if not already known
+        const ensureTemplate = async (envKey: string, name: string, instructions: string): Promise<void> => {
+          let templateId = Deno.env.get(envKey) ?? null
+          if (!templateId) {
+            console.log(`[push-agent] creating ${name} insight template`)
+            const templateRes = await fetch(`${TELNYX_API_BASE}/ai/conversations/insights`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${TELNYX_API_KEY}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ name, instructions }),
+            })
+            const templateJson = await templateRes.json()
+            console.log(`[push-agent] ${name} template create response ${templateRes.status}:`, JSON.stringify(templateJson))
+            templateId = (templateJson.id) as string | null
+            if (templateId) {
+              console.log(`[push-agent] IMPORTANT: set ${envKey}=${templateId} as a Supabase secret to reuse this template`)
+            }
+          }
+          if (templateId) {
+            const assignRes = await fetch(
+              `${TELNYX_API_BASE}/ai/conversations/insight-groups/${insightGroupId}/insights/${templateId}/assign`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${TELNYX_API_KEY}`,
+                  "Content-Type": "application/json",
+                },
+              },
+            )
+            const assignText = await assignRes.text()
+            console.log(`[push-agent] ${name} template assign response ${assignRes.status}:`, assignText.substring(0, 200))
+          }
+        }
+
+        await ensureTemplate(
+          "TELNYX_INSIGHT_TEMPLATE_ID",
+          "Call Summary",
+          "Summarize this conversation in 2-4 sentences. Include the reason for the call, key topics discussed, and any follow-up actions or outcomes.",
+        )
+        await ensureTemplate(
+          "TELNYX_TRANSCRIPT_TEMPLATE_ID",
+          "Transcript",
+          "Return the full verbatim transcript of this conversation. Format each line as 'Agent: <text>' or 'Caller: <text>'.",
+        )
+
+        // Set webhook URL on the insight group
+        const igPutRes = await fetch(`${TELNYX_API_BASE}/ai/conversations/insight-groups/${insightGroupId}`, {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${TELNYX_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ webhook: insightsWebhookUrl }),
+        })
+        const igPutJson = await igPutRes.json()
+        console.log(`[push-agent] insight group PUT response ${igPutRes.status}:`, JSON.stringify(igPutJson))
+      } catch (e) {
+        console.error("[push-agent] failed to configure insight group:", e)
+      }
+    } else {
+      console.log("[push-agent] no TELNYX_INSIGHT_GROUP_ID set — skipping insight group configuration")
+    }
+
     // Save both IDs
     const updatePayload: Record<string, unknown> = {
       telnyx_assistant_id: telnyxAssistantId,
@@ -309,6 +391,9 @@ Deno.serve(async (req) => {
     }
     if (texmlAppId) {
       updatePayload.telnyx_texml_app_id = texmlAppId
+    }
+    if (insightGroupId) {
+      updatePayload.telnyx_insight_group_id = insightGroupId
     }
     const { error: updateError } = await supabase
       .from("agent_settings")
