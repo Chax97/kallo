@@ -22,6 +22,7 @@ interface TelnyxCallPayload {
   _conversation_id?: string
   _answered_time?: string
   _call_duration?: string
+  _messages?: string
 }
 
 interface TelnyxEvent {
@@ -82,6 +83,7 @@ Deno.serve(async (req) => {
 
     // Map TeXML status_callback fields to our standard format
     const callStatus = formObj["CallStatus"] ?? formObj["callstatus"] ?? ""
+    const recordingStatus = formObj["RecordingStatus"] ?? ""
     const eventMap: Record<string, string> = {
       "ringing": "call.initiated",
       "in-progress": "call.answered",
@@ -91,11 +93,18 @@ Deno.serve(async (req) => {
       "failed": "call.hangup",
       "canceled": "call.hangup",
       "analyzed": "call.analyzed",
+      "conversation_ended": "call.conversation_ended",
     }
-    // If no CallStatus but has CallInitiatedAt, this is the initial call event
-    let mappedEvent = eventMap[callStatus.toLowerCase()] ?? ""
-    if (!mappedEvent && (formObj["CallInitiatedAt"] || formObj["CallerId"])) {
-      mappedEvent = "call.initiated"
+    // Recording callbacks use RecordingStatus instead of CallStatus
+    let mappedEvent = ""
+    if (recordingStatus === "completed") {
+      mappedEvent = "call.recording.saved"
+    } else {
+      mappedEvent = eventMap[callStatus.toLowerCase()] ?? ""
+      // If no CallStatus but has CallInitiatedAt, this is the initial call event
+      if (!mappedEvent && (formObj["CallInitiatedAt"] || formObj["CallerId"])) {
+        mappedEvent = "call.initiated"
+      }
     }
 
     const hangupCause = callStatus.toLowerCase() === "completed" ? "normal_clearing"
@@ -122,15 +131,40 @@ Deno.serve(async (req) => {
           // Pass analyzed event fields
           _recordings: formObj["Recordings"] ?? undefined,
           _conversation_insights: formObj["ConversationInsights"] ?? undefined,
-          _conversation_id: formObj["ConversationId"] ?? undefined,
+          _conversation_id: formObj["ConversationId"] ?? formObj["RecordingSid"] ?? undefined,
           _answered_time: formObj["AnsweredTime"] ?? undefined,
-          _call_duration: formObj["CallDuration"] ?? undefined,
+          _call_duration: formObj["CallDuration"] ?? formObj["DurationSec"] ?? formObj["RecordingDuration"] ?? undefined,
+          // Recording callback fields (RecordingStatus === "completed")
+          recording_urls: formObj["RecordingUrl"] ? { mp3: formObj["RecordingUrl"] } : undefined,
+          recording_duration_secs: formObj["RecordingDuration"] ? parseInt(formObj["RecordingDuration"]) : undefined,
+          recording_started_at: formObj["RecordingStartTime"] ?? undefined,
+          recording_ended_at: formObj["RecordingEndTime"] ?? undefined,
+          // Conversation ended fields
+          _messages: formObj["Messages"] ?? undefined,
         },
       },
     }
   } else {
     try {
-      payload = await req.json()
+      const raw = await req.json()
+      console.log("JSON webhook body keys:", JSON.stringify(Object.keys(raw ?? {})))
+      console.log("JSON webhook body (first 500):", JSON.stringify(raw).substring(0, 500))
+
+      // Telnyx Call Control webhooks: { data: { event_type, payload } }
+      // Telnyx AI platform webhooks may use a flat structure: { event_type, data/payload }
+      if (raw?.data?.event_type) {
+        payload = raw
+      } else if (raw?.event_type) {
+        // Flat structure — normalise into the expected shape
+        payload = {
+          data: {
+            event_type: raw.event_type,
+            payload: raw.payload ?? raw.data ?? raw,
+          },
+        }
+      } else {
+        payload = raw
+      }
     } catch {
       const rawBody = await req.text()
       console.log("Failed to parse request body:", rawBody.substring(0, 500))
@@ -352,6 +386,41 @@ Deno.serve(async (req) => {
           break
         }
 
+        // AI assistant calls don't fire call.initiated — create the record now from the hangup data
+        if (cs?.stage === "ai_assistant" && callData.from && callData.to) {
+          console.log(`Hangup: AI assistant call — creating record from hangup data`)
+          const didNumber = callData.to
+          let companyId: string | null = null
+          if (didNumber) {
+            const { data: phoneRow } = await supabase
+              .from("phone_numbers")
+              .select("company_id")
+              .eq("number", didNumber)
+              .maybeSingle()
+            companyId = phoneRow?.company_id ?? null
+          }
+          const durationSecs = callData.start_time
+            ? Math.floor((Date.now() - new Date(callData.start_time).getTime()) / 1000)
+            : (callData.duration_millis ? Math.floor(callData.duration_millis / 1000) : null)
+          await supabase.from("calls").upsert({
+            telnyx_call_id: callData.call_control_id,
+            call_leg_id: callData.call_leg_id,
+            call_session_id: callData.call_session_id,
+            direction: "inbound",
+            from_number: callData.from,
+            to_number: callData.to,
+            status: isCompleted ? "completed" : "missed",
+            state: isCompleted ? "completed" : "missed",
+            started_at: callData.start_time,
+            ended_at: new Date().toISOString(),
+            hangup_cause: hangupCause,
+            duration_seconds: durationSecs,
+            answered_by: "ai_assistant",
+            ...(companyId ? { company_id: companyId } : {}),
+          }, { onConflict: "telnyx_call_id" })
+          break
+        }
+
         console.log(`Hangup: no record found for ${callData.call_control_id} — skipping`)
         break
       }
@@ -568,6 +637,38 @@ Deno.serve(async (req) => {
         console.log("[analyzed] call record saved/updated")
       }
 
+      break
+    }
+
+    case "call.conversation_ended": {
+      // Telnyx AI assistant sends this after the conversation finishes.
+      // It carries the Messages transcript and DurationSec but no From/To,
+      // so we update the existing calls record if it exists.
+      console.log("[conversation_ended] call:", callData.call_control_id, "duration:", callData._call_duration)
+      const durationSecs = callData._call_duration ? parseInt(callData._call_duration) : null
+
+      let messages: Array<{ role: string; content: string; timestamp: string }> | null = null
+      try {
+        if (callData._messages) {
+          messages = JSON.parse(callData._messages)
+        }
+      } catch (e) {
+        console.error("[conversation_ended] failed to parse messages:", e)
+      }
+      console.log("[conversation_ended] messages count:", messages?.length ?? 0)
+
+      const updateFields: Record<string, unknown> = {
+        status: "completed",
+        state: "completed",
+        ended_at: new Date().toISOString(),
+        answered_by: "ai_assistant",
+      }
+      if (durationSecs !== null) updateFields.duration_seconds = durationSecs
+
+      await supabase
+        .from("calls")
+        .update(updateFields)
+        .eq("telnyx_call_id", callData.call_control_id)
       break
     }
 

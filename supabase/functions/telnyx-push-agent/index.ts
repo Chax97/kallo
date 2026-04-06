@@ -214,12 +214,15 @@ Deno.serve(async (req) => {
     const webhookUrl = `${supabaseUrl}/functions/v1/telnyx-webhook`
 
     payload.telephony = {
+      // status_callback_url ensures Telnyx sends call events even if the TeXML app PATCH below fails
+      status_callback_url: webhookUrl,
+      status_callback_method: "POST",
       ...(agent.record_calls ? {
         recording_settings: { enabled: true },
       } : {}),
     }
 
-    // Set the webhook at the assistant level
+    // Set the webhook at the assistant level (receives call.analyzed and other AI events)
     payload.webhook_url = webhookUrl
 
     let telnyxAssistantId: string = agent.telnyx_assistant_id

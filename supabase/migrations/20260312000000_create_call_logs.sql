@@ -13,6 +13,8 @@ create table if not exists call_logs (
   hangup_cause      text,
   duration_seconds  integer,
   recording_url     text,
+  storage_path      text,
+  answered_by       text,        -- 'app' | 'ai_assistant'
   created_at        timestamptz default now()
 );
 
