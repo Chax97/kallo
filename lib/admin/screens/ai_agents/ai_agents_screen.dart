@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -1054,6 +1055,7 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
                             (3, 'Keywords'),
                             (4, 'Behaviour'),
                             (5, 'Phone Numbers'),
+                            (6, 'Knowledge Base'),
                           ])
                           Padding(
                             padding: const EdgeInsets.only(right: 6),
@@ -1102,6 +1104,7 @@ class _AiAgentsScreenState extends ConsumerState<AiAgentsScreen> {
                         _KeywordsTab(settings: s, onPatch: _patch),
                         _BehaviourTab(settings: s, onPatch: _patch),
                         _PhoneNumbersTab(agentSettings: s),
+                        _KnowledgeBaseTab(agentSettings: s),
                       ],
                     ),
                   ),
@@ -3304,6 +3307,836 @@ class _DeployButton extends StatelessWidget {
     );
   }
 }
+
+// ── Tab 7: Knowledge Base ─────────────────────────────────────────────────────
+
+class _KnowledgeBaseTab extends ConsumerStatefulWidget {
+  final AgentSettings agentSettings;
+
+  const _KnowledgeBaseTab({required this.agentSettings});
+
+  @override
+  ConsumerState<_KnowledgeBaseTab> createState() => _KnowledgeBaseTabState();
+}
+
+class _KnowledgeBaseTabState extends ConsumerState<_KnowledgeBaseTab> {
+  List<Map<String, dynamic>> _items = [];
+  bool _loading = true;
+  bool _isEmbedding = false;
+  String? _embeddingLabel;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadItems();
+  }
+
+  @override
+  void didUpdateWidget(_KnowledgeBaseTab old) {
+    super.didUpdateWidget(old);
+    if (old.agentSettings.id != widget.agentSettings.id) _loadItems();
+  }
+
+  Future<void> _loadItems() async {
+    final agentId = widget.agentSettings.id;
+    if (agentId == null) {
+      setState(() {
+        _loading = false;
+        _items = [];
+      });
+      return;
+    }
+    // Only show full-page spinner on initial load, not on refreshes
+    if (_items.isEmpty) {
+      setState(() { _loading = true; _error = null; });
+    }
+    try {
+      final supabase = Supabase.instance.client;
+      final rows = await supabase
+          .from('agent_knowledge_items')
+          .select()
+          .eq('agent_id', agentId)
+          .order('sort_order')
+          .order('created_at');
+      if (mounted) {
+        setState(() {
+          _items = List<Map<String, dynamic>>.from(rows);
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  List<Map<String, dynamic>> get _qaItems =>
+      _items.where((i) => i['item_type'] == 'qa').toList();
+
+  List<Map<String, dynamic>> get _urlItems =>
+      _items.where((i) => i['item_type'] == 'url').toList();
+
+  List<Map<String, dynamic>> get _docItems =>
+      _items.where((i) => i['item_type'] == 'document').toList();
+
+  Future<void> _saveQaItem(String? id, String question, String answer) async {
+    final agentId = widget.agentSettings.id;
+    if (agentId == null) return;
+    final companyId = await ref.read(_companyIdProvider.future);
+    final supabase = Supabase.instance.client;
+    if (id != null) {
+      await supabase.from('agent_knowledge_items').update({
+        'question': question,
+        'answer': answer,
+        'updated_at': DateTime.now().toIso8601String(),
+      }).eq('id', id);
+    } else {
+      await supabase.from('agent_knowledge_items').insert({
+        'agent_id': agentId,
+        'company_id': companyId,
+        'item_type': 'qa',
+        'question': question,
+        'answer': answer,
+        'status': 'active',
+        'sort_order': _qaItems.length,
+      });
+    }
+    await _loadItems();
+  }
+
+  Future<void> _deleteItem(String id) async {
+    final supabase = Supabase.instance.client;
+    await supabase.from('agent_knowledge_items').delete().eq('id', id);
+    await _loadItems();
+  }
+
+  Future<void> _embedUrl(String url) async {
+    final agentId = widget.agentSettings.id;
+    if (agentId == null) return;
+    setState(() { _isEmbedding = true; _embeddingLabel = 'Embedding URL…'; });
+    try {
+      final supabase = Supabase.instance.client;
+      await supabase.auth.refreshSession();
+      final res = await supabase.functions.invoke(
+        'telnyx-embed-url',
+        body: {'agent_id': agentId, 'url': url},
+      );
+      if (res.status != 200) {
+        throw Exception('Embed failed (${res.status}): ${res.data}');
+      }
+      await _loadItems();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed to embed URL: $e',
+              style: _T.body(color: Colors.white)),
+          backgroundColor: _T.red,
+          behavior: SnackBarBehavior.floating,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() { _isEmbedding = false; _embeddingLabel = null; });
+    }
+  }
+
+  Future<void> _uploadDocument() async {
+    final agentId = widget.agentSettings.id;
+    if (agentId == null) return;
+
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf', 'txt', 'docx', 'md'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    if (file.bytes == null) return;
+
+    setState(() { _isEmbedding = true; _embeddingLabel = 'Uploading document…'; });
+    try {
+      final companyId = await ref.read(_companyIdProvider.future);
+      final supabase = Supabase.instance.client;
+      // Sanitize filename: replace any character that isn't alphanumeric, dot, hyphen or underscore
+      final safeFileName = file.name
+          .replaceAll(RegExp(r'[^\w.\-]'), '_')
+          .replaceAll(RegExp(r'_+'), '_');
+      final storagePath = 'knowledge-docs/$companyId/$agentId/$safeFileName';
+
+      // 1. Upload to Supabase Storage
+      await supabase.storage
+          .from('Knowledge Base Documents')
+          .uploadBinary(storagePath, file.bytes!,
+              fileOptions: const FileOptions(upsert: true));
+
+      // 2. Push to Telnyx bucket + embed via edge function
+      await supabase.auth.refreshSession();
+      final res = await supabase.functions.invoke(
+        'telnyx-embed-document',
+        body: {
+          'agent_id': agentId,
+          'storage_path': storagePath,
+          'file_name': safeFileName,
+        },
+      );
+      if (res.status != 200) {
+        throw Exception('Embed failed (${res.status}): ${res.data}');
+      }
+
+      await _loadItems();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Upload failed: $e',
+              style: _T.body(color: Colors.white)),
+          backgroundColor: _T.red,
+          behavior: SnackBarBehavior.floating,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() { _isEmbedding = false; _embeddingLabel = null; });
+    }
+  }
+
+  void _showAddQaDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => _QaDialog(
+        onSave: (q, a) => _saveQaItem(null, q, a),
+      ),
+    );
+  }
+
+  void _showEditQaDialog(Map<String, dynamic> item) {
+    showDialog(
+      context: context,
+      builder: (_) => _QaDialog(
+        initialQuestion: item['question'] as String? ?? '',
+        initialAnswer: item['answer'] as String? ?? '',
+        onSave: (q, a) => _saveQaItem(item['id'] as String, q, a),
+      ),
+    );
+  }
+
+  void _showAddUrlDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: Text('Add Website URL',
+            style: _T.label(size: 16, weight: FontWeight.w700)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Telnyx will crawl the site up to 5 levels deep and embed the content for RAG retrieval during calls.',
+              style: _T.body(size: 12, color: _T.sub),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              decoration: _T.inputDeco(hint: 'https://yourwebsite.com'),
+              keyboardType: TextInputType.url,
+              autofocus: true,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final url = controller.text.trim();
+              if (url.isNotEmpty) {
+                Navigator.of(ctx).pop();
+                _embedUrl(url);
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _T.accent,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+            ),
+            child: const Text('Embed URL'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final agentId = widget.agentSettings.id;
+
+    if (agentId == null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.save_outlined, size: 40, color: _T.muted),
+              const SizedBox(height: 12),
+              Text('Save the agent first',
+                  style: _T.label(
+                      size: 14,
+                      weight: FontWeight.w600,
+                      color: _T.sub)),
+              const SizedBox(height: 4),
+              Text(
+                'Knowledge Base is available after the agent has been saved.',
+                style: _T.body(size: 13, color: _T.muted),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline, color: _T.red, size: 40),
+              const SizedBox(height: 12),
+              Text('Failed to load knowledge base',
+                  style: _T.label(size: 14, color: _T.red)),
+              const SizedBox(height: 8),
+              Text(_error!, style: _T.body(color: _T.sub)),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                  onPressed: _loadItems, child: const Text('Retry')),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Stack(
+      children: [
+        ListView(
+          padding: const EdgeInsets.all(28),
+      children: [
+        // ── Q&A ──
+        _KbSectionHeader(
+          icon: Icons.question_answer_outlined,
+          title: 'Q&A Pairs',
+          subtitle:
+              'Exact answers injected directly into the agent\'s prompt — no RAG latency.',
+          action: _PillButton(
+              icon: Icons.add,
+              label: 'Add Q&A',
+              onTap: _showAddQaDialog),
+        ),
+        const SizedBox(height: 12),
+        if (_qaItems.isEmpty)
+          _KbEmptyHint(
+              message:
+                  'No Q&A pairs yet. Add specific questions your agent should answer precisely.')
+        else
+          for (final item in _qaItems) ...[
+            _QaCard(
+              question: item['question'] as String? ?? '',
+              answer: item['answer'] as String? ?? '',
+              onEdit: () => _showEditQaDialog(item),
+              onDelete: () => _deleteItem(item['id'] as String),
+            ),
+            const SizedBox(height: 8),
+          ],
+
+        const SizedBox(height: 28),
+
+        // ── URLs ──
+        _KbSectionHeader(
+          icon: Icons.language_outlined,
+          title: 'Website URLs',
+          subtitle:
+              'Telnyx crawls & embeds these sites for semantic retrieval during calls.',
+          action: _PillButton(
+              icon: Icons.add_link,
+              label: 'Add URL',
+              onTap: _showAddUrlDialog),
+        ),
+        const SizedBox(height: 12),
+        if (_urlItems.isEmpty)
+          _KbEmptyHint(
+              message:
+                  'No URLs embedded yet. Add your website or documentation pages.')
+        else
+          for (final item in _urlItems) ...[
+            _KbUrlCard(
+              url: item['url'] as String? ?? '',
+              status: item['status'] as String? ?? 'processing',
+              onDelete: () => _deleteItem(item['id'] as String),
+            ),
+            const SizedBox(height: 8),
+          ],
+
+        const SizedBox(height: 28),
+
+        // ── Documents ──
+        _KbSectionHeader(
+          icon: Icons.upload_file_outlined,
+          title: 'Documents',
+          subtitle: 'Upload PDFs, text files or docs (.pdf, .txt, .docx, .md).',
+          action: _PillButton(
+              icon: Icons.upload_outlined,
+              label: 'Upload',
+              onTap: _uploadDocument),
+        ),
+        const SizedBox(height: 12),
+        if (_docItems.isEmpty)
+          _KbEmptyHint(
+              message:
+                  'No documents uploaded yet. Upload product manuals, FAQs or policy docs.')
+        else
+          for (final item in _docItems) ...[
+            _KbDocCard(
+              name: item['content'] as String? ?? 'Document',
+              status: item['status'] as String? ?? 'active',
+              onDelete: () => _deleteItem(item['id'] as String),
+            ),
+            const SizedBox(height: 8),
+          ],
+
+        const SizedBox(height: 40),
+      ],
+        ),
+        if (_isEmbedding)
+          Container(
+            color: Colors.white.withValues(alpha: 0.7),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 16),
+                  Text(
+                    _embeddingLabel ?? 'Processing…',
+                    style: _T.label(size: 13, color: _T.sub),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ── Knowledge Base helper widgets ─────────────────────────────────────────────
+
+class _KbSectionHeader extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Widget action;
+
+  const _KbSectionHeader({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.action,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: _T.accentLight,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, size: 18, color: _T.accent),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title,
+                  style: _T.label(
+                      size: 14,
+                      weight: FontWeight.w700,
+                      color: _T.brand)),
+              const SizedBox(height: 2),
+              Text(subtitle, style: _T.body(size: 12, color: _T.sub)),
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        action,
+      ],
+    );
+  }
+}
+
+class _KbEmptyHint extends StatelessWidget {
+  final String message;
+
+  const _KbEmptyHint({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: _T.inputFill,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _T.border),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline, size: 16, color: _T.muted),
+          const SizedBox(width: 10),
+          Expanded(child: Text(message, style: _T.body(size: 12, color: _T.sub))),
+        ],
+      ),
+    );
+  }
+}
+
+class _QaCard extends StatelessWidget {
+  final String question;
+  final String answer;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  const _QaCard({
+    required this.question,
+    required this.answer,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _T.border),
+      ),
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  question.isEmpty ? 'No question' : question,
+                  style: _T.label(
+                      size: 13,
+                      weight: FontWeight.w600,
+                      color: _T.text),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  answer.isEmpty ? 'No answer' : answer,
+                  style: _T.body(size: 12, color: _T.sub),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            onPressed: onEdit,
+            icon: const Icon(Icons.edit_outlined,
+                size: 16, color: _T.sub),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            tooltip: 'Edit',
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            onPressed: onDelete,
+            icon: const Icon(Icons.delete_outline,
+                size: 16, color: _T.red),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            tooltip: 'Delete',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _KbUrlCard extends StatelessWidget {
+  final String url;
+  final String status;
+  final VoidCallback onDelete;
+
+  const _KbUrlCard({
+    required this.url,
+    required this.status,
+    required this.onDelete,
+  });
+
+  Color get _statusColor {
+    switch (status) {
+      case 'ready':
+        return _T.green;
+      case 'error':
+        return _T.red;
+      default:
+        return _T.amber;
+    }
+  }
+
+  String get _statusLabel {
+    switch (status) {
+      case 'ready':
+        return 'Ready';
+      case 'error':
+        return 'Error';
+      default:
+        return 'Processing';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _T.border),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.language_outlined, size: 16, color: _T.sub),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              url,
+              style: _T.body(size: 12, color: _T.text),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: _statusColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              _statusLabel,
+              style: TextStyle(
+                fontFamily: _T.fontFamily,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: _statusColor,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            onPressed: onDelete,
+            icon: const Icon(Icons.delete_outline,
+                size: 16, color: _T.red),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            tooltip: 'Remove',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _KbDocCard extends StatelessWidget {
+  final String name;
+  final String status;
+  final VoidCallback onDelete;
+
+  const _KbDocCard({
+    required this.name,
+    required this.status,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _T.border),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.insert_drive_file_outlined,
+              size: 16, color: _T.sub),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              name,
+              style: _T.body(size: 12, color: _T.text),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            onPressed: onDelete,
+            icon: const Icon(Icons.delete_outline,
+                size: 16, color: _T.red),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            tooltip: 'Remove',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _QaDialog extends StatefulWidget {
+  final String initialQuestion;
+  final String initialAnswer;
+  final Future<void> Function(String question, String answer) onSave;
+
+  const _QaDialog({
+    this.initialQuestion = '',
+    this.initialAnswer = '',
+    required this.onSave,
+  });
+
+  @override
+  State<_QaDialog> createState() => _QaDialogState();
+}
+
+class _QaDialogState extends State<_QaDialog> {
+  late final TextEditingController _qCtrl;
+  late final TextEditingController _aCtrl;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _qCtrl = TextEditingController(text: widget.initialQuestion);
+    _aCtrl = TextEditingController(text: widget.initialAnswer);
+  }
+
+  @override
+  void dispose() {
+    _qCtrl.dispose();
+    _aCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final q = _qCtrl.text.trim();
+    final a = _aCtrl.text.trim();
+    if (q.isEmpty || a.isEmpty) return;
+    setState(() => _saving = true);
+    try {
+      await widget.onSave(q, a);
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      title: Text(
+        widget.initialQuestion.isEmpty ? 'Add Q&A Pair' : 'Edit Q&A Pair',
+        style: _T.label(size: 16, weight: FontWeight.w700),
+      ),
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Question', style: _T.label(size: 12)),
+            const SizedBox(height: 6),
+            TextField(
+              controller: _qCtrl,
+              decoration: _T.inputDeco(
+                  hint: 'e.g. What are your opening hours?'),
+              maxLines: 2,
+              autofocus: true,
+            ),
+            const SizedBox(height: 14),
+            Text('Answer', style: _T.label(size: 12)),
+            const SizedBox(height: 6),
+            TextField(
+              controller: _aCtrl,
+              decoration: _T.inputDeco(
+                  hint: 'e.g. We are open Monday to Friday, 9am to 5pm.'),
+              maxLines: 4,
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _saving ? null : _submit,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _T.accent,
+            foregroundColor: Colors.white,
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8)),
+          ),
+          child: _saving
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white),
+                )
+              : const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Save Bar ──────────────────────────────────────────────────────────────────
 
 class _SaveBar extends StatelessWidget {
   final bool isSaving;

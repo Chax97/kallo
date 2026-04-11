@@ -40,7 +40,10 @@ async function telnyxRequest(
 
 // ── Build system instructions from agent_settings fields ──────────────────────
 
-function buildInstructions(agent: Record<string, unknown>): string {
+function buildInstructions(
+  agent: Record<string, unknown>,
+  qaItems: Array<{ question: string; answer: string }> = [],
+): string {
   const lines: string[] = []
 
   // Identity
@@ -145,6 +148,16 @@ function buildInstructions(agent: Record<string, unknown>): string {
   if (agent.allow_barge_in) lines.push("Allow the caller to interrupt you mid-sentence.")
   if (agent.announce_recording) lines.push("Announce at the start that the call may be recorded.")
 
+  // Knowledge Base — Q&A pairs (exact answers, injected directly)
+  if (qaItems.length > 0) {
+    lines.push("\n## Knowledge Base — Q&A")
+    lines.push("When a caller asks one of the following questions, use the exact answer provided:")
+    for (const item of qaItems) {
+      lines.push(`Q: ${item.question}`)
+      lines.push(`A: ${item.answer}`)
+    }
+  }
+
   return lines.join("\n")
 }
 
@@ -179,8 +192,25 @@ Deno.serve(async (req) => {
     if (!agent) throw new Error(`Agent not found: ${agent_id}`)
     console.log("[push-agent] agent:", agent.agent_name, "telnyx_assistant_id:", agent.telnyx_assistant_id)
 
+    // Fetch Q&A knowledge items to inject into the prompt
+    const { data: qaItems } = await supabase
+      .from("agent_knowledge_items")
+      .select("question, answer")
+      .eq("agent_id", agent_id)
+      .eq("item_type", "qa")
+      .eq("status", "active")
+      .order("sort_order")
+
+    // Fetch URL items — each has its own bucket stored in `content`
+    const { data: urlItems } = await supabase
+      .from("agent_knowledge_items")
+      .select("content")
+      .eq("agent_id", agent_id)
+      .eq("item_type", "url")
+      .eq("status", "ready")
+
     // Build Telnyx assistant payload from agent_settings
-    const instructions = buildInstructions(agent)
+    const instructions = buildInstructions(agent, qaItems ?? [])
     console.log("[push-agent] instructions length:", instructions.length)
 
     // Map language to determine if English-only (enables faster STT model)
@@ -197,6 +227,25 @@ Deno.serve(async (req) => {
 
     if (agent.greeting) payload.greeting = agent.greeting
     if (agent.business_description) payload.description = agent.business_description
+
+    // Collect all bucket IDs: per-URL buckets (stored in content) + shared doc bucket
+    const bucketIds: string[] = []
+    for (const item of urlItems ?? []) {
+      if (item.content) bucketIds.push(item.content as string)
+    }
+    if (agent.knowledge_bucket_name) {
+      bucketIds.push(agent.knowledge_bucket_name as string)
+    }
+
+    const tools: unknown[] = []
+    if (bucketIds.length > 0) {
+      tools.push({
+        type: "retrieval",
+        retrieval: { bucket_ids: bucketIds },
+      })
+    }
+    payload.tools = tools
+    console.log(`[push-agent] retrieval bucket_ids: ${JSON.stringify(bucketIds)}`)
 
     // Telnyx Ultra: sub-100ms TTFB, built for real-time AI assistants
     // Falls back to KokoroTTS for non-English

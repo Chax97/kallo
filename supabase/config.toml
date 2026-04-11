@@ -70,3 +70,13 @@ entrypoint = "./functions/telnyx-push-agent/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/ai-call-insights/index.ts"
+
+[functions.telnyx-embed-url]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-embed-url/index.ts"
+
+[functions.telnyx-embed-document]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/telnyx-embed-document/index.ts"
