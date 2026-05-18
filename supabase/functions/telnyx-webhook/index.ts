@@ -40,6 +40,11 @@ const supabase = createClient(
 const TELNYX_API_KEY = Deno.env.get("TELNYX_API_KEY")!
 const TELNYX_CONNECTION_ID = Deno.env.get("TELNYX_CONNECTION_ID")!
 
+// Model used for post-call summary generation. Llama 3.1 8B Instruct is a
+// 7B-tier model on Telnyx ($0.10/M tokens), fast enough to keep webhook
+// handler latency low. To swap, change this constant; the rest is the same.
+const TELNYX_SUMMARY_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+
 async function callControlAction(
   callControlId: string,
   action: string,
@@ -67,6 +72,189 @@ function decodeClientState(encoded?: string): Record<string, unknown> {
     return JSON.parse(atob(encoded))
   } catch {
     return {}
+  }
+}
+
+// Generates a CRM-ready summary of an AI call transcript using Telnyx's
+// chat completions endpoint. Returns null on failure so the caller can
+// proceed without a summary; the HubSpot engagement will still get the
+// transcript and recording, just no summary block.
+//
+// Latency budget: typically 2-4 sec for short conversations. 20 sec hard
+// timeout to keep Telnyx webhook retries away.
+async function generateAiSummary(
+  messages: Array<{ role?: string; content?: string }>,
+): Promise<string | null> {
+  // Skip trivially short conversations (e.g. caller hung up immediately).
+  // Not worth an LLM call and the summary would be uninformative anyway.
+  const validMessages = messages.filter(
+    (m) => m && typeof m.content === "string" && m.content.trim().length > 0,
+  )
+  if (validMessages.length < 2) {
+    console.log("[summary] conversation too short, skipping generation")
+    return null
+  }
+
+  const transcript = validMessages
+    .map((m) => `${m.role ?? "speaker"}: ${m.content}`)
+    .join("\n")
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 20000)
+
+  try {
+    const response = await fetch(
+      "https://api.telnyx.com/v2/ai/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${TELNYX_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: TELNYX_SUMMARY_MODEL,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are summarising a phone call for a CRM. Write 2 to 3 sentences covering: who called and their intent, key information discussed, and any next steps or outcomes. Be factual and concise. Start directly with the content, no preamble, no labels, no headings.",
+            },
+            {
+              role: "user",
+              content: `Phone call transcript:\n${transcript}`,
+            },
+          ],
+          max_tokens: 200,
+          temperature: 0.3,
+        }),
+        signal: controller.signal,
+      },
+    )
+
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      const errText = await response.text()
+      console.error(
+        `[summary] Telnyx chat failed ${response.status}: ${
+          errText.substring(0, 300)
+        }`,
+      )
+      return null
+    }
+
+    const data = await response.json()
+    const summary: string | undefined = data?.choices?.[0]?.message?.content
+    if (!summary?.trim()) {
+      console.error("[summary] empty response from Telnyx")
+      return null
+    }
+    console.log(`[summary] generated: ${summary.substring(0, 120)}`)
+    return summary.trim()
+  } catch (err) {
+    clearTimeout(timeoutId)
+    if ((err as { name?: string }).name === "AbortError") {
+      console.error("[summary] generation timed out after 20s")
+    } else {
+      console.error("[summary] generation error:", err)
+    }
+    return null
+  }
+}
+
+// Invokes hubspot-push-call only when both ai_messages and storage_path
+// are populated on the calls row. Called from call.recording.saved and
+// call.conversation_ended; whichever event finishes second triggers the
+// real push. Used for AI assistant calls.
+async function tryPushIfReady(telnyxCallId: string) {
+  const { data: row } = await supabase
+    .from("calls")
+    .select("id, ai_messages, storage_path, crm_sync_status")
+    .eq("telnyx_call_id", telnyxCallId)
+    .maybeSingle()
+
+  if (!row?.id) {
+    console.log("[hubspot] tryPushIfReady: no calls row", telnyxCallId)
+    return
+  }
+  if (row.crm_sync_status === "synced") {
+    console.log("[hubspot] tryPushIfReady: already synced", telnyxCallId)
+    return
+  }
+
+  const messages = Array.isArray(row.ai_messages) ? row.ai_messages : null
+  const hasMessages = messages !== null && messages.length > 0
+  const hasRecording = !!row.storage_path
+
+  if (!hasMessages || !hasRecording) {
+    console.log(
+      `[hubspot] tryPushIfReady: not ready hasMessages=${hasMessages} hasRecording=${hasRecording}`,
+    )
+    return
+  }
+
+  await invokeInternal("hubspot-push-call", { call_id: row.id })
+}
+
+// Invokes hubspot-update-engagement-body once the AI summary has arrived
+// (via call.analyzed) AND the engagement already exists in HubSpot (via
+// an earlier hubspot-push-call success). If the engagement doesn't exist
+// yet, the analyzed handler triggers a fresh push instead.
+async function tryUpdateBody(telnyxCallId: string) {
+  const { data: row } = await supabase
+    .from("calls")
+    .select("id, ai_summary, hubspot_engagement_id, crm_sync_status")
+    .eq("telnyx_call_id", telnyxCallId)
+    .maybeSingle()
+
+  if (!row?.id) {
+    console.log("[hubspot] tryUpdateBody: no calls row", telnyxCallId)
+    return
+  }
+  if (!row.ai_summary) {
+    console.log("[hubspot] tryUpdateBody: no summary yet")
+    return
+  }
+  if (!row.hubspot_engagement_id) {
+    console.log("[hubspot] tryUpdateBody: no engagement yet, trying push instead")
+    // Engagement hasn't been created yet (rare: analyzed beat both
+    // recording.saved and conversation_ended). Run the normal push path.
+    await tryPushIfReady(telnyxCallId)
+    return
+  }
+
+  await invokeInternal("hubspot-update-engagement-body", { call_id: row.id })
+}
+
+// Shared helper for invoking another internal Edge Function with the
+// service role key. Logs the HTTP status and a short body excerpt; never
+// throws, so the webhook response is unaffected by downstream errors.
+async function invokeInternal(
+  functionName: string,
+  body: Record<string, unknown>,
+) {
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")
+  if (!serviceKey || !supabaseUrl) {
+    console.error(`[hubspot] missing env vars, cannot invoke ${functionName}`)
+    return
+  }
+
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/${functionName}`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${serviceKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    })
+    const responseText = await res.text()
+    console.log(
+      `[hubspot] ${functionName} http=${res.status} ok=${res.ok} body=${responseText.substring(0, 800)}`,
+    )
+  } catch (err) {
+    console.error(`[hubspot] ${functionName} failed:`, err)
   }
 }
 
@@ -540,119 +728,92 @@ Deno.serve(async (req) => {
           ...(isVoicemail ? { status: "voicemail" } : {}),
         })
         .eq("telnyx_call_id", callData.call_control_id)
+
+      // Trigger downstream processing if the recording landed in Storage and
+      // this isn't a voicemail.
+      //   - AI assistant calls (cs.stage === 'ai_assistant'): try push,
+      //     waiting on call.conversation_ended for the transcript + summary.
+      //   - Human SIP calls (any other stage, typically undefined): invoke
+      //     transcribe-call to run Telnyx Deepgram Nova-3 transcription,
+      //     which then triggers hubspot-push-call once transcript is stored.
+      if (!isVoicemail && savedStoragePath) {
+        if (cs?.stage === "ai_assistant") {
+          tryPushIfReady(callData.call_control_id!)
+            .catch((err) => console.error("[hubspot] push error:", err))
+        } else {
+          invokeInternal("transcribe-call", {
+            telnyx_call_id: callData.call_control_id,
+          }).catch((err) => console.error("[transcribe] invoke error:", err))
+        }
+      }
       break
     }
 
     case "call.analyzed": {
-      // Post-call analysis from AI assistant — contains recordings, insights, transcript
+      // Post-call analysis from AI assistant. Carries:
+      //   - recordings: download URLs (we ignore; call.recording.saved handled
+      //     the audio already)
+      //   - conversation_insights: AI-generated summary
+      //   - messages: transcript (also delivered via call.conversation_ended)
+      //
+      // This event is unreliable — Telnyx skips it for short calls and lags
+      // when it does fire. We now generate our own summary in
+      // call.conversation_ended via Telnyx chat completions, so this handler
+      // is only a fallback for the rare case our generation failed.
       console.log("[analyzed] Processing AI assistant post-call data for", callData.call_control_id)
 
-      let recordingUrl: string | null = null
-      let durationSeconds: number | null = null
-      let storagePath: string | null = null
-
-      // Parse recordings
+      let aiSummary: string | null = null
       try {
-        const recordings = JSON.parse(callData._recordings ?? "[]")
-        if (Array.isArray(recordings) && recordings.length > 0) {
-          const rec = recordings[0]
-          recordingUrl = rec.download_urls?.mp3 ?? null
-          if (rec.start_time && rec.end_time) {
-            durationSeconds = Math.round(
-              (new Date(rec.end_time).getTime() - new Date(rec.start_time).getTime()) / 1000
-            )
-          }
-          console.log("[analyzed] recording URL:", recordingUrl, "duration:", durationSeconds)
-        }
-      } catch (e) {
-        console.error("[analyzed] failed to parse recordings:", e)
-      }
-
-      // Parse conversation insights
-      let insightSummary: string | null = null
-      try {
-        const insights = JSON.parse(callData._conversation_insights ?? "[]")
-        if (Array.isArray(insights) && insights.length > 0) {
-          const results = insights[0]?.conversation_insights
-          if (Array.isArray(results) && results.length > 0) {
-            insightSummary = results[0]?.result ?? null
+        const insightsRoot = JSON.parse(callData._conversation_insights ?? "[]")
+        if (Array.isArray(insightsRoot) && insightsRoot.length > 0) {
+          const results = insightsRoot[0]?.conversation_insights
+          if (Array.isArray(results)) {
+            // Prefer narrative summaries (skip transcript-style results that
+            // start with role prefixes like "Agent:" or "Caller:").
+            for (const item of results) {
+              const result: string | undefined = item?.result
+              if (!result || typeof result !== "string") continue
+              if (/^(Agent|Caller|User|Assistant):/i.test(result.trim())) continue
+              aiSummary = result.trim()
+              break
+            }
+            if (!aiSummary) {
+              for (const item of results) {
+                if (typeof item?.result === "string" && item.result.trim()) {
+                  aiSummary = item.result.trim()
+                  break
+                }
+              }
+            }
           }
         }
-        console.log("[analyzed] insight summary:", insightSummary?.substring(0, 100))
+        console.log("[analyzed] ai summary parsed:", aiSummary?.substring(0, 100))
       } catch (e) {
         console.error("[analyzed] failed to parse insights:", e)
       }
 
-      // Download and store the recording
-      if (recordingUrl) {
-        try {
-          const audioRes = await fetch(recordingUrl, {
-            headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
-          })
-          if (!audioRes.ok) {
-            console.error(`[recording] download failed: ${audioRes.status} ${audioRes.statusText}`)
-            break
-          }
-          const audioBlob = await audioRes.blob()
-          if (audioBlob.size < 1000) {
-            console.error(`[recording] file too small (${audioBlob.size} bytes), likely not audio`)
-            break
-          }
-          const safeId = (callData.call_control_id ?? "unknown").replace(/[^a-zA-Z0-9\-_]/g, "_")
-          const fileName = `${safeId}-${Date.now()}.mp3`
-
-          const { error: storageError } = await supabase.storage
-            .from("call_recordings")
-            .upload(fileName, audioBlob, { contentType: "audio/mpeg", upsert: true })
-
-          if (storageError) {
-            console.error("[analyzed] storage error:", storageError.message)
-          } else {
-            storagePath = fileName
-            console.log("[analyzed] recording saved:", storagePath)
-          }
-        } catch (e) {
-          console.error("[analyzed] recording download error:", e)
-        }
-      }
-
-      // Look up the phone number to get company_id
-      const didNumber = callData.to
-      let companyId: string | null = null
-      if (didNumber) {
-        const { data: phoneRow } = await supabase
-          .from("phone_numbers")
-          .select("company_id")
-          .eq("number", didNumber)
+      if (aiSummary) {
+        // Only write if our own generation didn't already produce one.
+        // Avoids overwriting a summary that already made it into HubSpot.
+        const { data: existing } = await supabase
+          .from("calls")
+          .select("ai_summary")
+          .eq("telnyx_call_id", callData.call_control_id)
           .maybeSingle()
-        companyId = phoneRow?.company_id ?? null
-      }
 
-      // Upsert into calls table with all the AI assistant data
-      const callDurationSecs = callData._call_duration ? parseInt(callData._call_duration) : durationSeconds
-      const { error: upsertError } = await supabase.from("calls").upsert({
-        telnyx_call_id: callData.call_control_id,
-        call_session_id: callData.call_session_id,
-        direction: "inbound",
-        from_number: callData.from,
-        to_number: callData.to,
-        status: "completed",
-        state: "completed",
-        started_at: callData.start_time ?? callData._answered_time,
-        answered_at: callData._answered_time,
-        ended_at: new Date().toISOString(),
-        duration_seconds: callDurationSecs,
-        recording_url: recordingUrl,
-        storage_path: storagePath,
-        hangup_cause: "normal_clearing",
-        answered_by: "ai_assistant",
-        ...(companyId ? { company_id: companyId } : {}),
-      }, { onConflict: "telnyx_call_id" })
+        if (existing && !existing.ai_summary) {
+          console.log("[analyzed] no existing summary, writing Telnyx insights as fallback")
+          await supabase
+            .from("calls")
+            .update({ ai_summary: aiSummary })
+            .eq("telnyx_call_id", callData.call_control_id)
 
-      if (upsertError) {
-        console.error("[analyzed] calls upsert error:", upsertError.message)
-      } else {
-        console.log("[analyzed] call record saved/updated")
+          // PATCH engagement if one exists, otherwise let the normal push run.
+          tryUpdateBody(callData.call_control_id!)
+            .catch((err) => console.error("[hubspot] update error:", err))
+        } else {
+          console.log("[analyzed] existing summary present, skipping insights write")
+        }
       }
 
       break
@@ -660,8 +821,15 @@ Deno.serve(async (req) => {
 
     case "call.conversation_ended": {
       // Telnyx AI assistant sends this after the conversation finishes.
-      // It carries the Messages transcript and DurationSec but no From/To,
-      // so we update the existing calls record if it exists.
+      // Carries the Messages transcript and DurationSec but no From/To.
+      // We:
+      //   1. Parse the transcript and persist it as ai_messages
+      //   2. Generate an AI summary via Telnyx chat completions (best-effort
+      //      with a 20 second timeout — push proceeds without summary if this
+      //      fails or times out)
+      //   3. Persist ai_messages and ai_summary in a single update
+      //   4. Trigger the HubSpot push, which now has both transcript and
+      //      summary available
       console.log("[conversation_ended] call:", callData.call_control_id, "duration:", callData._call_duration)
       const durationSecs = callData._call_duration ? parseInt(callData._call_duration) : null
 
@@ -675,6 +843,14 @@ Deno.serve(async (req) => {
       }
       console.log("[conversation_ended] messages count:", messages?.length ?? 0)
 
+      // Generate the summary BEFORE the database update so we can persist
+      // ai_messages and ai_summary atomically. This blocks the webhook
+      // response for the duration of the LLM call (typically 2-4 sec).
+      let aiSummary: string | null = null
+      if (messages && messages.length >= 2) {
+        aiSummary = await generateAiSummary(messages)
+      }
+
       const endedAt = new Date().toISOString()
       const updateFields: Record<string, unknown> = {
         status: "completed",
@@ -685,11 +861,22 @@ Deno.serve(async (req) => {
       if (durationSecs !== null) updateFields.duration_seconds = durationSecs
       // Store the Telnyx conversation ID so the insight group webhook can link back to this call
       if (callData._conversation_id) updateFields.call_session_id = callData._conversation_id
+      // Persist messages for downstream HubSpot transcript build
+      if (messages) updateFields.ai_messages = messages
+      // Persist our generated summary if we got one
+      if (aiSummary) updateFields.ai_summary = aiSummary
 
       await supabase
         .from("calls")
         .update(updateFields)
         .eq("telnyx_call_id", callData.call_control_id)
+
+      // Try the HubSpot push. If call.recording.saved has already finished
+      // (and populated storage_path), this will succeed. Otherwise this is
+      // a no-op and call.recording.saved will trigger the push when it runs.
+      tryPushIfReady(callData.call_control_id!)
+        .catch((err) => console.error("[hubspot] push error:", err))
+
       break
     }
 
